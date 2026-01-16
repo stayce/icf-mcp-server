@@ -31,7 +31,7 @@ The ICF is a WHO classification that complements ICD (diagnosis codes) by descri
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/icf-mcp-server.git
+git clone https://github.com/stayce/icf-mcp-server.git
 cd icf-mcp-server
 
 # Create virtual environment

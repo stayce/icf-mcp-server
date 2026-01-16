@@ -38,9 +38,9 @@ dev = [
 icf-mcp = "icf_mcp:main"
 
 [project.urls]
-Homepage = "https://github.com/YOUR_USERNAME/icf-mcp-server"
-Repository = "https://github.com/YOUR_USERNAME/icf-mcp-server"
-Issues = "https://github.com/YOUR_USERNAME/icf-mcp-server/issues"
+Homepage = "https://github.com/stayce/icf-mcp-server"
+Repository = "https://github.com/stayce/icf-mcp-server"
+Issues = "https://github.com/stayce/icf-mcp-server/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/icf_mcp"]
