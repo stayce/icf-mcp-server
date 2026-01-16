@@ -8,6 +8,8 @@ ICF MCP Server - A Model Context Protocol (MCP) server that provides tools for a
 
 ## Architecture
 
+**Package structure:** `src/icf_mcp/`
+
 **Two-module design:**
 - `server.py` - FastMCP server with 6 tools exposed to MCP clients (icf_lookup, icf_search, icf_browse_category, icf_get_children, icf_explain_qualifier, icf_overview)
 - `who_client.py` - Async HTTP client (`WHOICFClient`) for WHO ICD-API with OAuth2 client credentials authentication
