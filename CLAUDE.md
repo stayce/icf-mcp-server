@@ -15,21 +15,26 @@ ICF MCP Server (`icf-mcp-server` v0.1.0) is a Model Context Protocol (MCP) serve
 ```
 src/icf_mcp/
 ├── __init__.py      # Package exports: main, mcp, WHOICFClient, ICFEntity, ICFSearchResult
-├── server.py        # FastMCP server with 6 MCP tools (379 lines)
-└── who_client.py    # Async WHO ICD-API client with OAuth2 auth (411 lines)
+├── server.py        # FastMCP server with 11 MCP tools (664 lines)
+└── who_client.py    # Async WHO ICD-API client with OAuth2 auth (483 lines)
 ```
 
 Uses `src/` layout with Hatchling build system. Entry point: `icf-mcp = "icf_mcp:main"`.
 
 ### Two-Module Design
 
-- **`server.py`** — FastMCP server defining 6 tools via `@mcp.tool()` decorators:
+- **`server.py`** — FastMCP server defining 11 tools via `@mcp.tool()` decorators:
   - `icf_lookup(code)` — Look up a specific ICF code (e.g., "b280", "d450")
   - `icf_search(query, max_results=10)` — Search by keywords
   - `icf_browse_category(category)` — Browse top-level categories ("b", "s", "d", "e")
   - `icf_get_children(code)` — Get subcategories of a code
   - `icf_explain_qualifier(qualifier)` — Explain qualifier values (0-4, 8, 9)
   - `icf_overview()` — Return full ICF classification overview
+  - `icf_get_parent(code)` — Navigate up the hierarchy to a code's parent category
+  - `icf_get_siblings(code)` — Get codes at the same level (same parent)
+  - `icf_validate_code(code)` — Validate code format and verify existence via WHO API
+  - `icf_build_profile(codes)` — Build a structured functional profile from multiple codes
+  - `icf_get_code_chain(code)` — Show the full hierarchy path from root to a code
 - **`who_client.py`** — `WHOICFClient` class handling OAuth2 client credentials auth and all HTTP communication with the WHO ICD-API
 
 ### Data Flow

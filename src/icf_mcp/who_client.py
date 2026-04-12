@@ -404,6 +404,78 @@ class WHOICFClient:
             uri=data.get("@id", data.get("id", None)),
         )
     
+    async def get_parent(self, code: str) -> tuple[ICFEntity | None, ICFEntity | None]:
+        """
+        Get an ICF entity and its parent.
+
+        Args:
+            code: ICF code (e.g., "b280")
+
+        Returns:
+            Tuple of (entity, parent_entity). Either may be None.
+        """
+        entity = await self.get_entity_by_code(code)
+        if not entity or not entity.parent:
+            return entity, None
+
+        parent = await self.get_entity_by_uri(entity.parent)
+        return entity, parent
+
+    async def get_siblings(self, code: str) -> tuple[ICFEntity | None, list[ICFEntity]]:
+        """
+        Get sibling entities of an ICF code (other children of the same parent).
+
+        Args:
+            code: ICF code (e.g., "b280")
+
+        Returns:
+            Tuple of (entity, list_of_siblings). Entity may be None.
+        """
+        entity = await self.get_entity_by_code(code)
+        if not entity or not entity.parent:
+            return entity, []
+
+        parent = await self.get_entity_by_uri(entity.parent)
+        if not parent or not parent.children:
+            return entity, []
+
+        siblings = []
+        for child_uri in parent.children:
+            child = await self.get_entity_by_uri(child_uri)
+            if child and child.code != entity.code:
+                siblings.append(child)
+
+        return entity, siblings
+
+    async def get_code_chain(self, code: str) -> list[ICFEntity]:
+        """
+        Get the full hierarchy chain from root down to a specific code.
+
+        Args:
+            code: ICF code (e.g., "b2800")
+
+        Returns:
+            List of entities from root to the code, ordered root-first.
+        """
+        entity = await self.get_entity_by_code(code)
+        if not entity:
+            return []
+
+        chain = [entity]
+        current = entity
+        max_depth = 10  # Safety limit to prevent infinite loops
+
+        while current.parent and max_depth > 0:
+            parent = await self.get_entity_by_uri(current.parent)
+            if not parent:
+                break
+            chain.append(parent)
+            current = parent
+            max_depth -= 1
+
+        chain.reverse()  # Root first
+        return chain
+
     async def close(self) -> None:
         """Close the HTTP client"""
         if self._http_client:
