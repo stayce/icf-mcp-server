@@ -15,24 +15,25 @@ ICF MCP Server (`icf-mcp-server` v0.1.0) is a Model Context Protocol (MCP) serve
 ```
 src/icf_mcp/
 ├── __init__.py      # Package exports: main, mcp, WHOICFClient, ICFEntity, ICFSearchResult
-├── server.py        # FastMCP server with 11 MCP tools (664 lines)
-└── who_client.py    # Async WHO ICD-API client with OAuth2 auth (483 lines)
+├── server.py        # FastMCP server with 12 MCP tools + qualifier parsing (1057 lines)
+└── who_client.py    # Async WHO ICD-API client with OAuth2 auth (509 lines)
 ```
 
 Uses `src/` layout with Hatchling build system. Entry point: `icf-mcp = "icf_mcp:main"`.
 
 ### Two-Module Design
 
-- **`server.py`** — FastMCP server defining 11 tools via `@mcp.tool()` decorators:
+- **`server.py`** — FastMCP server defining 12 tools via `@mcp.tool()` decorators:
   - `icf_lookup(code)` — Look up a specific ICF code (e.g., "b280", "d450")
   - `icf_search(query, max_results=10)` — Search by keywords
-  - `icf_browse_category(category)` — Browse top-level categories ("b", "s", "d", "e")
+  - `icf_browse_category(category)` — Browse categories and sub-chapters ("b", "d4", "e3", etc.)
   - `icf_get_children(code)` — Get subcategories of a code
-  - `icf_explain_qualifier(qualifier)` — Explain qualifier values (0-4, 8, 9)
+  - `icf_explain_qualifier(component, qualifier)` — Component-specific qualifier reference (b/s/d/e)
   - `icf_overview()` — Return full ICF classification overview
   - `icf_get_parent(code)` — Navigate up the hierarchy to a code's parent category
   - `icf_get_siblings(code)` — Get codes at the same level (same parent)
-  - `icf_validate_code(code)` — Validate code format and verify existence via WHO API
+  - `icf_validate_code(code)` — Validate code format, qualifiers, and verify existence
+  - `icf_parse_qualified_code(code)` — Parse fully qualified codes (d450.23, s730.312, e120+3)
   - `icf_build_profile(codes)` — Build a structured functional profile from multiple codes
   - `icf_get_code_chain(code)` — Show the full hierarchy path from root to a code
 - **`who_client.py`** — `WHOICFClient` class handling OAuth2 client credentials auth and all HTTP communication with the WHO ICD-API
@@ -156,14 +157,26 @@ Codes are hierarchical: `b2` (chapter) → `b280` (3-digit) → `b2800` (4-digit
 
 ### Qualifiers
 
-Qualifiers (0-4, 8, 9) rate severity:
-- 0: No problem (0-4%)
-- 1: Mild (5-24%)
-- 2: Moderate (25-49%)
-- 3: Severe (50-95%)
-- 4: Complete (96-100%)
-- 8: Not specified
-- 9: Not applicable
+Each component has a different qualifier system:
+
+**Body Functions (b)** — 1 qualifier: extent of impairment
+- Format: `b{code}.{extent}` (e.g., `b280.2` = moderate pain impairment)
+
+**Body Structures (s)** — 3 qualifiers: extent, nature of change, location
+- Format: `s{code}.{extent}{nature}{location}` (e.g., `s730.312` = severe, total absence, right)
+- Nature of change: 0=no change, 1=total absence, 2=partial absence, 3=additional part, 4=aberrant dimensions, 5=discontinuity, 6=deviating position, 7=qualitative changes
+- Location: 0=multiple regions, 1=right, 2=left, 3=both sides, 4=front, 5=back, 6=proximal, 7=distal
+
+**Activities & Participation (d)** — 2 qualifiers: performance, capacity
+- Format: `d{code}.{performance}{capacity}` (e.g., `d450.23` = moderate performance, severe capacity)
+- Performance = what a person does in current environment
+- Capacity = what a person can do in standardized environment
+
+**Environmental Factors (e)** — 1 qualifier: barrier or facilitator
+- Barriers: `e{code}.{value}` (e.g., `e120.2` = moderate barrier)
+- Facilitators: `e{code}+{value}` (e.g., `e120+3` = substantial facilitator)
+
+**Generic severity scale** (used across all components): 0=none (0-4%), 1=mild (5-24%), 2=moderate (25-49%), 3=severe (50-95%), 4=complete (96-100%), 8=not specified, 9=not applicable
 
 ## Conventions
 

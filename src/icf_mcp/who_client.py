@@ -282,41 +282,67 @@ class WHOICFClient:
     
     async def browse_category(self, category: str) -> dict[str, Any]:
         """
-        Browse a top-level ICF category.
-        
-        Categories:
-        - "b": Body Functions
-        - "s": Body Structures
-        - "d": Activities and Participation
-        - "e": Environmental Factors
-        
+        Browse an ICF category or sub-chapter.
+
+        Accepts top-level components (b, s, d, e) or sub-chapters (b1, d4, e3, etc.).
+
         Args:
-            category: Single letter category code
-            
+            category: Category code — single letter (b, s, d, e) or sub-chapter (b1, d4, etc.)
+
         Returns:
-            Dictionary with category info and children
+            Dictionary with category info and children/results
         """
-        # Map category letters to their chapter ranges
+        import re
+
+        cat = category.strip().lower()
         category_map = {
             "b": "Body Functions",
-            "s": "Body Structures", 
+            "s": "Body Structures",
             "d": "Activities and Participation",
             "e": "Environmental Factors",
         }
-        
-        if category.lower() not in category_map:
+
+        # Check if this is a sub-chapter (e.g., "b1", "d4", "e3")
+        sub_match = re.match(r'^([bsde])(\d{1,3})$', cat)
+
+        if sub_match:
+            # Sub-chapter browsing — use entity lookup + children
+            component_letter = sub_match.group(1)
+            component_name = category_map.get(component_letter, "Unknown")
+
+            entity = await self.get_entity_by_code(cat)
+            if not entity:
+                raise ValueError(
+                    f"Sub-chapter '{cat}' not found in the WHO API. "
+                    f"Try a top-level category ({', '.join(category_map.keys())}) "
+                    f"or a valid sub-chapter code."
+                )
+
+            children = await self.get_children(cat)
+            return {
+                "category": cat,
+                "name": f"{entity.title} ({component_name})",
+                "description": entity.definition or f"Sub-chapter {cat} under {component_name}.",
+                "results": [
+                    {"code": c.code, "title": c.title, "score": 0.0, "uri": c.uri or ""}
+                    for c in children
+                ],
+            }
+
+        if cat not in category_map:
             raise ValueError(
                 f"Invalid category '{category}'. "
-                f"Must be one of: {list(category_map.keys())}"
+                f"Use a component letter ({', '.join(category_map.keys())}) "
+                f"or a sub-chapter code (e.g., b1, d4, e3)."
             )
-        
-        # Search for top-level items in this category
-        results = await self.search(category_map[category.lower()], max_results=20)
-        
+
+        # Top-level category browsing — use search
+        results = await self.search(category_map[cat], max_results=20)
+
         return {
-            "category": category.lower(),
-            "name": category_map[category.lower()],
-            "description": self._get_category_description(category.lower()),
+            "category": cat,
+            "name": category_map[cat],
+            "description": self._get_category_description(cat),
             "results": [r.to_dict() for r in results],
         }
     

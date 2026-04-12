@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import sys
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
@@ -163,40 +164,45 @@ async def icf_search(query: str, max_results: int = 10) -> str:
 @mcp.tool()
 async def icf_browse_category(category: str) -> str:
     """
-    Browse a top-level ICF category to explore available codes.
-    
-    ICF has four main categories:
-    - "b": Body Functions - physiological and psychological functions
-    - "s": Body Structures - anatomical parts of the body
-    - "d": Activities and Participation - task execution and life involvement
-    - "e": Environmental Factors - physical, social, attitudinal environment
-    
+    Browse an ICF category or sub-chapter to explore available codes.
+
+    Accepts top-level components or sub-chapter codes:
+    - "b", "s", "d", "e": Top-level components
+    - "b1": Mental functions chapter
+    - "b2": Sensory functions and pain
+    - "d4": Mobility chapter
+    - "e1": Products and technology
+    - Any valid sub-chapter code (e.g., "b1", "s7", "d45", "e3")
+
     Args:
-        category: Single letter category code (b, s, d, or e)
-        
+        category: Component letter (b, s, d, e) or sub-chapter code (b1, d4, etc.)
+
     Returns:
-        Overview of the category with example codes and chapters.
+        Overview of the category/sub-chapter with child codes.
     """
     client = get_client()
-    
+
     try:
         result = await client.browse_category(category)
-        
+
         lines = [
             f"**ICF Category: {result['name']}** (codes starting with '{result['category']}')",
             "",
             result["description"],
             "",
-            "**Sample codes in this category:**",
         ]
-        
-        for item in result["results"][:10]:
-            lines.append(f"  - **{item['code']}**: {item['title']}")
-        
-        lines.append(f"\nUse `icf_search` or `icf_lookup` for more specific codes.")
-        
+
+        if result["results"]:
+            lines.append("**Codes in this category:**")
+            for item in result["results"][:20]:
+                lines.append(f"  - **{item['code']}**: {item['title']}")
+        else:
+            lines.append("*No child codes found — this may be a leaf-level code.*")
+
+        lines.append(f"\nUse `icf_get_children` to drill deeper, or `icf_lookup` for full details.")
+
         return "\n".join(lines)
-        
+
     except ValueError as e:
         return str(e)
     except Exception as e:
@@ -243,42 +249,154 @@ async def icf_get_children(code: str) -> str:
 
 
 @mcp.tool()
-async def icf_explain_qualifier(qualifier: int) -> str:
+async def icf_explain_qualifier(component: str = "generic", qualifier: int | None = None) -> str:
     """
-    Explain ICF qualifier values used to rate severity of impairment.
-    
-    ICF uses qualifiers (0-4, 8, 9) to indicate the magnitude of a problem:
-    
+    Explain ICF qualifier systems. Each ICF component uses different qualifiers.
+
+    ICF qualifier types vary by component:
+    - Body Functions (b): 1 qualifier — extent of impairment (0-4)
+    - Body Structures (s): 3 qualifiers — extent, nature of change, location
+    - Activities & Participation (d): 2 qualifiers — performance, capacity
+    - Environmental Factors (e): 1 qualifier — barrier (0-4) or facilitator (+0 to +4)
+
     Args:
-        qualifier: The qualifier value (0-4, 8, or 9)
-        
+        component: Component to explain qualifiers for. One of:
+            "generic" (default severity scale), "b" (body functions),
+            "s" (body structures), "d" (activities & participation),
+            "e" (environmental factors)
+        qualifier: Optional specific qualifier value to explain (0-9).
+            If omitted, shows all qualifiers for the component.
+
     Returns:
-        Explanation of what the qualifier value means.
+        Explanation of qualifier system for the specified component.
     """
-    qualifiers = {
+    # Generic severity scale (used as the 1st qualifier across b, s, d)
+    generic_scale = {
         0: ("No problem", "0-4%", "None, absent, negligible"),
         1: ("Mild problem", "5-24%", "Slight, low"),
         2: ("Moderate problem", "25-49%", "Medium, fair"),
         3: ("Severe problem", "50-95%", "High, extreme"),
         4: ("Complete problem", "96-100%", "Total"),
-        8: ("Not specified", "N/A", "Insufficient information to specify severity"),
-        9: ("Not applicable", "N/A", "Inappropriate to apply this code"),
+        8: ("Not specified", "N/A", "Insufficient information to specify"),
+        9: ("Not applicable", "N/A", "Inappropriate to apply"),
     }
-    
-    if qualifier not in qualifiers:
-        return (
-            f"Invalid qualifier '{qualifier}'. "
-            f"Valid values are: 0 (no problem), 1 (mild), 2 (moderate), "
-            f"3 (severe), 4 (complete), 8 (not specified), 9 (not applicable)"
-        )
-    
-    level, percentage, description = qualifiers[qualifier]
-    
+
+    comp = component.strip().lower()
+
+    if comp == "generic" or comp == "b":
+        label = "Body Functions (b) — Extent of Impairment" if comp == "b" else "Generic Severity Scale"
+        if qualifier is not None:
+            if qualifier not in generic_scale:
+                return f"Invalid qualifier value '{qualifier}'. Valid: 0-4, 8, 9."
+            level, pct, desc = generic_scale[qualifier]
+            example = f"b280.{qualifier}" if comp == "b" else f"d450.{qualifier}"
+            return (
+                f"**{label} — Qualifier {qualifier}: {level}**\n\n"
+                f"- **Percentage range:** {pct}\n"
+                f"- **Description:** {desc}\n\n"
+                f"Example: {example} means '{level.lower()}'."
+            )
+        lines = [f"**{label}**\n"]
+        for val, (level, pct, desc) in generic_scale.items():
+            lines.append(f"- **{val}**: {level} ({pct}) — {desc}")
+        if comp == "b":
+            lines.append("\nBody Functions use a single qualifier: b280.**2** = moderate impairment.")
+        return "\n".join(lines)
+
+    if comp == "s":
+        nature_of_change = {
+            0: "No change in structure",
+            1: "Total absence",
+            2: "Partial absence",
+            3: "Additional part",
+            4: "Aberrant dimensions",
+            5: "Discontinuity",
+            6: "Deviating position",
+            7: "Qualitative changes in structure",
+            8: "Not specified",
+            9: "Not applicable",
+        }
+        location = {
+            0: "More than one region",
+            1: "Right",
+            2: "Left",
+            3: "Both sides",
+            4: "Front",
+            5: "Back",
+            6: "Proximal",
+            7: "Distal",
+            8: "Not specified",
+            9: "Not applicable",
+        }
+        lines = [
+            "**Body Structures (s) — 3 Qualifiers**\n",
+            "Body Structure codes use three qualifiers: `s{code}.{extent}{nature}{location}`\n",
+            "Example: **s730.312** = structure of lower extremity, severe impairment (3),",
+            "total absence (1), right side (2)\n",
+            "### 1st Qualifier: Extent of Impairment\n",
+        ]
+        for val, (level, pct, desc) in generic_scale.items():
+            lines.append(f"- **{val}**: {level} ({pct})")
+        lines.append("\n### 2nd Qualifier: Nature of Change\n")
+        for val, desc in nature_of_change.items():
+            lines.append(f"- **{val}**: {desc}")
+        lines.append("\n### 3rd Qualifier: Location\n")
+        for val, desc in location.items():
+            lines.append(f"- **{val}**: {desc}")
+        return "\n".join(lines)
+
+    if comp == "d":
+        lines = [
+            "**Activities & Participation (d) — 2 Qualifiers**\n",
+            "Activity/Participation codes use two qualifiers: `d{code}.{performance}{capacity}`\n",
+            "- **Performance**: what a person *does* in their current environment",
+            "- **Capacity**: what a person *can do* in a standardized environment\n",
+            "Example: **d450.23** = walking, moderate difficulty in performance (2),",
+            "severe limitation in capacity (3)\n",
+            "### Both qualifiers use the standard severity scale:\n",
+        ]
+        for val, (level, pct, desc) in generic_scale.items():
+            lines.append(f"- **{val}**: {level} ({pct})")
+        return "\n".join(lines)
+
+    if comp == "e":
+        barrier_scale = {
+            0: ("No barrier", "0-4%"),
+            1: ("Mild barrier", "5-24%"),
+            2: ("Moderate barrier", "25-49%"),
+            3: ("Severe barrier", "50-95%"),
+            4: ("Complete barrier", "96-100%"),
+        }
+        facilitator_scale = {
+            0: ("No facilitator", "0-4%"),
+            1: ("Mild facilitator", "5-24%"),
+            2: ("Moderate facilitator", "25-49%"),
+            3: ("Substantial facilitator", "50-95%"),
+            4: ("Complete facilitator", "96-100%"),
+        }
+        lines = [
+            "**Environmental Factors (e) — 1 Qualifier (Barrier or Facilitator)**\n",
+            "Environmental codes use a single qualifier with two directions:\n",
+            "- **Barriers** use a dot: `e{code}.{value}` (e.g., e120.2 = moderate barrier)",
+            "- **Facilitators** use a plus: `e{code}+{value}` (e.g., e120+3 = substantial facilitator)\n",
+            "### Barrier Scale (negative influence)\n",
+        ]
+        for val, (level, pct) in barrier_scale.items():
+            lines.append(f"- **.{val}**: {level} ({pct})")
+        lines.append("\n### Facilitator Scale (positive influence)\n")
+        for val, (level, pct) in facilitator_scale.items():
+            lines.append(f"- **+{val}**: {level} ({pct})")
+        lines.append("\n- **8**: Not specified")
+        lines.append("- **9**: Not applicable")
+        return "\n".join(lines)
+
     return (
-        f"**ICF Qualifier {qualifier}: {level}**\n\n"
-        f"- **Percentage range:** {percentage}\n"
-        f"- **Description:** {description}\n\n"
-        f"Example: d450.{qualifier} means '{level.lower()}' difficulty with walking."
+        f"Unknown component '{component}'. Valid values:\n"
+        f"- `generic`: Standard severity scale (default)\n"
+        f"- `b`: Body Functions (1 qualifier)\n"
+        f"- `s`: Body Structures (3 qualifiers)\n"
+        f"- `d`: Activities & Participation (2 qualifiers)\n"
+        f"- `e`: Environmental Factors (barrier/facilitator)"
     )
 
 
@@ -345,25 +463,35 @@ Physical, social and attitudinal environment.
 
 ## Qualifiers
 
-Severity is rated on a scale:
-- 0: No problem (0-4%)
-- 1: Mild problem (5-24%)
-- 2: Moderate problem (25-49%)
-- 3: Severe problem (50-95%)
-- 4: Complete problem (96-100%)
+Each component has its own qualifier system:
+
+**Body Functions (b):** 1 qualifier — extent of impairment (0-4)
+  Example: b280.2 = moderate pain impairment
+
+**Body Structures (s):** 3 qualifiers — extent, nature of change, location
+  Example: s730.312 = severe extent, total absence, right side
+
+**Activities & Participation (d):** 2 qualifiers — performance, capacity
+  Example: d450.23 = moderate performance difficulty, severe capacity limitation
+
+**Environmental Factors (e):** barriers (.) or facilitators (+)
+  Example: e120.2 = moderate barrier; e120+3 = substantial facilitator
+
+Generic severity scale (0-4): 0=none, 1=mild, 2=moderate, 3=severe, 4=complete
 
 ## Tools Available
 
 - `icf_lookup`: Get details for a specific code
 - `icf_search`: Find codes by keyword
-- `icf_browse_category`: Explore a category
+- `icf_browse_category`: Explore a category or sub-chapter (b, d4, e3, etc.)
 - `icf_get_children`: Get subcodes of a code
 - `icf_get_parent`: Navigate up to a code's parent category
 - `icf_get_siblings`: Find related codes at the same level
 - `icf_get_code_chain`: Show the full hierarchy path from root to a code
-- `icf_validate_code`: Check if a code is valid
+- `icf_validate_code`: Validate a code with qualifier support
+- `icf_parse_qualified_code`: Parse qualified codes (d450.23, s730.312, e120+3)
 - `icf_build_profile`: Build a functional profile from multiple codes
-- `icf_explain_qualifier`: Understand severity ratings
+- `icf_explain_qualifier`: Component-specific qualifier reference
 
 ## More Information
 
@@ -463,69 +591,262 @@ async def icf_get_siblings(code: str) -> str:
         return f"Error getting siblings: {str(e)}"
 
 
+# =============================================================================
+# Qualifier parsing helpers
+# =============================================================================
+
+# Component names
+_COMPONENTS = {
+    "b": "Body Functions",
+    "s": "Body Structures",
+    "d": "Activities and Participation",
+    "e": "Environmental Factors",
+}
+
+# Hierarchy level names
+_LEVELS = {
+    1: "Chapter (1st level)",
+    2: "Block (2nd level)",
+    3: "Category (3rd level)",
+    4: "Subcategory (4th level)",
+}
+
+# Generic severity scale (used by b, s-1st, d-performance, d-capacity)
+_GENERIC_SCALE = {
+    0: "No problem (0-4%)",
+    1: "Mild problem (5-24%)",
+    2: "Moderate problem (25-49%)",
+    3: "Severe problem (50-95%)",
+    4: "Complete problem (96-100%)",
+    8: "Not specified",
+    9: "Not applicable",
+}
+
+# Body Structures — 2nd qualifier: nature of change
+_NATURE_OF_CHANGE = {
+    0: "No change in structure",
+    1: "Total absence",
+    2: "Partial absence",
+    3: "Additional part",
+    4: "Aberrant dimensions",
+    5: "Discontinuity",
+    6: "Deviating position",
+    7: "Qualitative changes in structure",
+    8: "Not specified",
+    9: "Not applicable",
+}
+
+# Body Structures — 3rd qualifier: location
+_LOCATION = {
+    0: "More than one region",
+    1: "Right",
+    2: "Left",
+    3: "Both sides",
+    4: "Front",
+    5: "Back",
+    6: "Proximal",
+    7: "Distal",
+    8: "Not specified",
+    9: "Not applicable",
+}
+
+# Environmental Factors — barrier scale
+_BARRIER_SCALE = {
+    0: "No barrier (0-4%)",
+    1: "Mild barrier (5-24%)",
+    2: "Moderate barrier (25-49%)",
+    3: "Severe barrier (50-95%)",
+    4: "Complete barrier (96-100%)",
+    8: "Not specified",
+    9: "Not applicable",
+}
+
+# Environmental Factors — facilitator scale
+_FACILITATOR_SCALE = {
+    0: "No facilitator (0-4%)",
+    1: "Mild facilitator (5-24%)",
+    2: "Moderate facilitator (25-49%)",
+    3: "Substantial facilitator (50-95%)",
+    4: "Complete facilitator (96-100%)",
+    8: "Not specified",
+    9: "Not applicable",
+}
+
+
+def _parse_icf_code(raw: str) -> dict[str, Any]:
+    """
+    Parse a raw ICF code string (with or without qualifiers) into its components.
+
+    Supports formats:
+        b280, d450.2, d450.23, s730.312, e120.2, e120+3
+
+    Returns a dict with keys:
+        base_code, component, component_name, digits, level,
+        qualifier_str, separator, is_facilitator, qualifiers (list of dicts),
+        error (str or None)
+    """
+    raw = raw.strip()
+
+    # Full pattern: component + digits + optional separator + qualifier digits
+    # Separators: "." for barriers/impairments, "+" for facilitators
+    pattern = r'^([bBsSdDeE])(\d{1,4})(?:([.+])(\d+))?$'
+    match = re.match(pattern, raw)
+
+    if not match:
+        return {"error": (
+            f"'{raw}' does not match ICF code format.\n\n"
+            f"**Base code:** `[bsde]` + 1-4 digits (e.g., b280, d450)\n"
+            f"**With qualifiers:** code + `.` or `+` + qualifier digits\n"
+            f"  - b280.2 (body function, moderate impairment)\n"
+            f"  - d450.23 (activity, performance=2, capacity=3)\n"
+            f"  - s730.312 (structure, extent=3, nature=1, location=2)\n"
+            f"  - e120.2 (environment, moderate barrier)\n"
+            f"  - e120+3 (environment, substantial facilitator)"
+        )}
+
+    component = match.group(1).lower()
+    digits = match.group(2)
+    separator = match.group(3)  # "." or "+" or None
+    qualifier_str = match.group(4)  # "2", "23", "312", or None
+
+    base_code = f"{component}{digits}"
+    component_name = _COMPONENTS[component]
+    level = _LEVELS.get(len(digits), "Unknown")
+    is_facilitator = separator == "+"
+
+    result: dict[str, Any] = {
+        "base_code": base_code,
+        "component": component,
+        "component_name": component_name,
+        "digits": digits,
+        "level": level,
+        "qualifier_str": qualifier_str,
+        "separator": separator,
+        "is_facilitator": is_facilitator,
+        "qualifiers": [],
+        "error": None,
+    }
+
+    if not qualifier_str:
+        return result
+
+    # Parse qualifiers based on component
+    qdigits = [int(d) for d in qualifier_str]
+
+    if component == "b":
+        # Body Functions: 1 qualifier (extent of impairment)
+        if len(qdigits) > 1:
+            result["error"] = (
+                f"Body Functions (b) use 1 qualifier: extent of impairment. "
+                f"Got {len(qdigits)} digits ('{qualifier_str}')."
+            )
+            return result
+        result["qualifiers"] = [
+            {"name": "Extent of impairment", "value": qdigits[0],
+             "meaning": _GENERIC_SCALE.get(qdigits[0], "Unknown")}
+        ]
+
+    elif component == "s":
+        # Body Structures: up to 3 qualifiers
+        if len(qdigits) > 3:
+            result["error"] = (
+                f"Body Structures (s) use up to 3 qualifiers. "
+                f"Got {len(qdigits)} digits ('{qualifier_str}')."
+            )
+            return result
+        scales = [
+            ("Extent of impairment", _GENERIC_SCALE),
+            ("Nature of change", _NATURE_OF_CHANGE),
+            ("Location", _LOCATION),
+        ]
+        for i, val in enumerate(qdigits):
+            name, scale = scales[i]
+            result["qualifiers"].append({
+                "name": name, "value": val,
+                "meaning": scale.get(val, "Unknown"),
+            })
+
+    elif component == "d":
+        # Activities & Participation: up to 2 qualifiers
+        if len(qdigits) > 2:
+            result["error"] = (
+                f"Activities & Participation (d) use up to 2 qualifiers. "
+                f"Got {len(qdigits)} digits ('{qualifier_str}')."
+            )
+            return result
+        names = ["Performance", "Capacity"]
+        for i, val in enumerate(qdigits):
+            result["qualifiers"].append({
+                "name": names[i], "value": val,
+                "meaning": _GENERIC_SCALE.get(val, "Unknown"),
+            })
+
+    elif component == "e":
+        # Environmental Factors: 1 qualifier (barrier or facilitator)
+        if len(qdigits) > 1:
+            result["error"] = (
+                f"Environmental Factors (e) use 1 qualifier. "
+                f"Got {len(qdigits)} digits ('{qualifier_str}')."
+            )
+            return result
+        scale = _FACILITATOR_SCALE if is_facilitator else _BARRIER_SCALE
+        label = "Facilitator" if is_facilitator else "Barrier"
+        result["qualifiers"] = [
+            {"name": label, "value": qdigits[0],
+             "meaning": scale.get(qdigits[0], "Unknown")}
+        ]
+
+    return result
+
+
 @mcp.tool()
 async def icf_validate_code(code: str) -> str:
     """
-    Validate an ICF code — check its format and verify it exists in the WHO API.
+    Validate an ICF code — check format, qualifiers, and verify it exists.
 
-    Returns a structural breakdown of the code (component, level, chapter)
-    and confirms whether it is a valid, recognized ICF code.
+    Supports both base codes and fully qualified codes with qualifiers:
+    - Base: "b280", "d4501"
+    - Qualified: "b280.2", "d450.23", "s730.312", "e120+3"
 
     Args:
-        code: ICF code to validate (e.g., "b280", "d4501", "xyz")
+        code: ICF code to validate (e.g., "b280", "d450.23", "s730.312")
 
     Returns:
-        Code analysis with format validation and API verification.
+        Code analysis with format validation, qualifier breakdown, and API verification.
     """
-    code_clean = code.strip().lower()
+    parsed = _parse_icf_code(code)
 
-    # Basic format check
-    pattern = r'^([bsde])(\d{1,4})$'
-    match = re.match(pattern, code_clean)
+    if parsed.get("error") and "base_code" not in parsed:
+        return parsed["error"]
 
-    if not match:
-        return (
-            f"'{code}' does not match ICF code format.\n\n"
-            f"ICF codes consist of:\n"
-            f"- A letter prefix: b (Body Functions), s (Body Structures), "
-            f"d (Activities and Participation), e (Environmental Factors)\n"
-            f"- 1 to 4 digits\n\n"
-            f"Examples: b1 (chapter), b280 (category), d4501 (subcategory)"
-        )
-
-    component_letter = match.group(1)
-    digits = match.group(2)
-
-    components = {
-        "b": "Body Functions",
-        "s": "Body Structures",
-        "d": "Activities and Participation",
-        "e": "Environmental Factors",
-    }
-
-    levels = {
-        1: "Chapter (1st level)",
-        2: "Block (2nd level)",
-        3: "Category (3rd level)",
-        4: "Subcategory (4th level)",
-    }
-
-    level = levels.get(len(digits), "Unknown")
-    component = components[component_letter]
+    base_code = parsed["base_code"]
+    component = parsed["component"]
+    component_name = parsed["component_name"]
+    level = parsed["level"]
+    digits = parsed["digits"]
 
     lines = [
-        f"**Code Analysis: {code_clean}**\n",
-        f"- **Component:** {component} ({component_letter})",
+        f"**Code Analysis: {code.strip()}**\n",
+        f"- **Base code:** {base_code}",
+        f"- **Component:** {component_name} ({component})",
         f"- **Level:** {level}",
-        f"- **Chapter:** {component_letter}{digits[0]}",
+        f"- **Chapter:** {component}{digits[0]}",
     ]
 
-    # Verify against the WHO API
+    # Show qualifier breakdown
+    if parsed.get("error"):
+        lines.append(f"\n**Qualifier error:** {parsed['error']}")
+    elif parsed["qualifiers"]:
+        lines.append("\n**Qualifiers:**")
+        for q in parsed["qualifiers"]:
+            lines.append(f"- **{q['name']}:** {q['value']} — {q['meaning']}")
+
+    # Verify base code against the WHO API
     client = get_client()
     try:
-        entity = await client.get_entity_by_code(code_clean)
+        entity = await client.get_entity_by_code(base_code)
         if entity:
-            lines.append(f"\n**Valid:** Confirmed in WHO ICD-API.")
+            lines.append(f"\n**Valid:** Base code confirmed in WHO ICD-API.")
             lines.append(f"- **Title:** {entity.title}")
             if entity.definition:
                 lines.append(f"- **Definition:** {entity.definition}")
@@ -538,6 +859,73 @@ async def icf_validate_code(code: str) -> str:
             )
     except Exception:
         lines.append(f"\n**Could not verify** against the WHO API.")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def icf_parse_qualified_code(code: str) -> str:
+    """
+    Parse a fully qualified ICF code and explain each qualifier component.
+
+    Qualified ICF codes encode severity/characteristics after the base code:
+    - b280.2 → Body Functions: moderate impairment
+    - d450.23 → Activities: performance=moderate, capacity=severe
+    - s730.312 → Structures: severe extent, total absence, right side
+    - e120.2 → Environment: moderate barrier
+    - e120+3 → Environment: substantial facilitator
+
+    Args:
+        code: Fully qualified ICF code (e.g., "d450.23", "s730.312", "e120+3")
+
+    Returns:
+        Detailed breakdown of the code and all qualifier values.
+    """
+    parsed = _parse_icf_code(code)
+
+    if parsed.get("error") and "base_code" not in parsed:
+        return parsed["error"]
+
+    base_code = parsed["base_code"]
+    component_name = parsed["component_name"]
+
+    lines = [f"**Parsed: {code.strip()}**\n"]
+
+    # Look up the base code
+    client = get_client()
+    try:
+        entity = await client.get_entity_by_code(base_code)
+        if entity:
+            lines.append(f"**{base_code}**: {entity.title}")
+            if entity.definition:
+                lines.append(f"_{entity.definition}_\n")
+            else:
+                lines.append("")
+        else:
+            lines.append(f"**{base_code}**: *(not found in WHO API)*\n")
+    except Exception:
+        lines.append(f"**{base_code}**: *(could not verify)*\n")
+
+    lines.append(f"**Component:** {component_name}")
+
+    if parsed.get("error"):
+        lines.append(f"\n**Qualifier error:** {parsed['error']}")
+    elif parsed["qualifiers"]:
+        lines.append(f"\n**Qualifiers:**\n")
+        for q in parsed["qualifiers"]:
+            lines.append(f"- **{q['name']}** (value {q['value']}): {q['meaning']}")
+    else:
+        lines.append("\n*No qualifiers specified. Use `icf_explain_qualifier` "
+                     f"with component=\"{parsed['component']}\" to see available qualifiers.*")
+
+    # Show the expected qualifier pattern for this component
+    patterns = {
+        "b": "b{code}.{extent}",
+        "s": "s{code}.{extent}{nature}{location}",
+        "d": "d{code}.{performance}{capacity}",
+        "e": "e{code}.{barrier}  or  e{code}+{facilitator}",
+    }
+    lines.append(f"\n**Qualifier format for {component_name}:** `{patterns[parsed['component']]}`")
 
     return "\n".join(lines)
 
