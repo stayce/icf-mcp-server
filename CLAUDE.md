@@ -15,15 +15,16 @@ ICF MCP Server (`icf-mcp-server` v0.1.0) is a Model Context Protocol (MCP) serve
 ```
 src/icf_mcp/
 ├── __init__.py      # Package exports: main, mcp, WHOICFClient, ICFEntity, ICFSearchResult
-├── server.py        # FastMCP server with 12 MCP tools + qualifier parsing (1057 lines)
+├── instruments.py   # Clinical assessment instruments with ICF mappings (971 lines)
+├── server.py        # FastMCP server with 17 MCP tools + qualifier parsing (1400 lines)
 └── who_client.py    # Async WHO ICD-API client with OAuth2 auth (509 lines)
 ```
 
 Uses `src/` layout with Hatchling build system. Entry point: `icf-mcp = "icf_mcp:main"`.
 
-### Two-Module Design
+### Three-Module Design
 
-- **`server.py`** — FastMCP server defining 12 tools via `@mcp.tool()` decorators:
+- **`server.py`** — FastMCP server defining 17 tools via `@mcp.tool()` decorators:
   - `icf_lookup(code)` — Look up a specific ICF code (e.g., "b280", "d450")
   - `icf_search(query, max_results=10)` — Search by keywords
   - `icf_browse_category(category)` — Browse categories and sub-chapters ("b", "d4", "e3", etc.)
@@ -36,6 +37,12 @@ Uses `src/` layout with Hatchling build system. Entry point: `icf-mcp = "icf_mcp
   - `icf_parse_qualified_code(code)` — Parse fully qualified codes (d450.23, s730.312, e120+3)
   - `icf_build_profile(codes)` — Build a structured functional profile from multiple codes
   - `icf_get_code_chain(code)` — Show the full hierarchy path from root to a code
+  - `icf_list_instruments(domain)` — List available clinical assessment instruments
+  - `icf_instrument_details(name)` — Full instrument spec: items, scoring, ICF mappings
+  - `icf_score_instrument(name, responses)` — Score responses and get clinical interpretation
+  - `icf_suggest_instruments(condition, icf_code, domain)` — Suggest instruments for a condition or ICF code
+  - `icf_instrument_icf_mapping(name)` — Show how an instrument maps to ICF codes
+- **`instruments.py`** — Clinical assessment instrument definitions with ICF mappings. 11 instruments: GAD-7, PHQ-9, RADAI-5, SLEDAI-2K, WHODAS 2.0, HAQ-DI, PROMIS-10, CAT, ODI, NRS Pain, Short FES-I. Includes scoring logic, score interpretation ranges, and alias resolution.
 - **`who_client.py`** — `WHOICFClient` class handling OAuth2 client credentials auth and all HTTP communication with the WHO ICD-API
 
 ### Data Flow

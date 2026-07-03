@@ -18,6 +18,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from .who_client import WHOICFClient, ICFEntity
+from . import instruments as inst
 
 # Configure logging to stderr (important for STDIO transport)
 logging.basicConfig(
@@ -1041,6 +1042,348 @@ async def icf_get_code_chain(code: str) -> str:
     except Exception as e:
         logger.error(f"Error getting code chain for {code}: {e}")
         return f"Error getting code chain: {str(e)}"
+
+
+# =============================================================================
+# Assessment Instrument Tools
+# =============================================================================
+
+@mcp.tool()
+async def icf_list_instruments(domain: str = "") -> str:
+    """
+    List available standardized assessment instruments.
+
+    Instruments are clinical questionnaires (GAD-7, PHQ-9, RADAI-5, SLEDAI,
+    WHODAS 2.0, etc.) used for RPM patient assessment, each mapped to ICF codes.
+
+    Args:
+        domain: Optional filter by domain (e.g., "Mental Health", "Rheumatology",
+            "Pain", "Respiratory", "General"). Leave empty for all instruments.
+
+    Returns:
+        Table of available instruments with key details.
+    """
+    instruments = inst.INSTRUMENTS.values()
+
+    if domain:
+        domain_lower = domain.strip().lower()
+        instruments = [i for i in instruments if domain_lower in i.domain.lower()]
+
+    if not instruments:
+        return (
+            f"No instruments found for domain '{domain}'.\n\n"
+            f"Available domains: {', '.join(inst.DOMAINS)}"
+        )
+
+    lines = ["**Available Assessment Instruments**\n"]
+    if domain:
+        lines[0] = f"**Assessment Instruments — {domain}**\n"
+
+    for i in sorted(instruments, key=lambda x: (x.domain, x.abbreviation)):
+        lines.append(
+            f"- **{i.abbreviation}** — {i.name}\n"
+            f"  {i.domain} · {len(i.items)} items · {i.completion_time} · "
+            f"Recall: {i.recall_period} · RPM: {i.rpm_frequency}"
+        )
+
+    lines.append(f"\n*{len(list(instruments))} instrument(s). "
+                 f"Use `icf_instrument_details` for full item text and scoring.*")
+    lines.append(f"\n**Domains:** {', '.join(inst.DOMAINS)}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def icf_instrument_details(name: str) -> str:
+    """
+    Get full details of a clinical assessment instrument.
+
+    Shows all questionnaire items, response options, scoring method, score
+    interpretation ranges, and ICF code mappings.
+
+    Args:
+        name: Instrument name or abbreviation (e.g., "GAD-7", "PHQ-9",
+            "RADAI-5", "SLEDAI", "WHODAS", "HAQ", "ODI", "CAT", "NRS")
+
+    Returns:
+        Complete instrument specification.
+    """
+    instrument = inst.resolve_instrument(name)
+    if not instrument:
+        available = ", ".join(i.abbreviation for i in inst.INSTRUMENTS.values())
+        return f"Unknown instrument '{name}'. Available: {available}"
+
+    lines = [
+        f"**{instrument.abbreviation}: {instrument.name}**\n",
+        instrument.description,
+        "",
+        f"- **Domain:** {instrument.domain}",
+        f"- **Conditions:** {', '.join(instrument.conditions)}",
+        f"- **Items:** {len(instrument.items)}",
+        f"- **Score range:** {instrument.min_score}–{instrument.max_score}",
+        f"- **Scoring:** {instrument.scoring_method}",
+        f"- **Recall period:** {instrument.recall_period}",
+        f"- **Administration:** {instrument.administration}",
+        f"- **Completion time:** {instrument.completion_time}",
+        f"- **RPM frequency:** {instrument.rpm_frequency}",
+    ]
+
+    if instrument.notes:
+        lines.append(f"- **Notes:** {instrument.notes}")
+
+    lines.append("\n### Items\n")
+    for item in instrument.items:
+        options_str = " | ".join(f"{o.value}={o.label}" for o in item.options)
+        lines.append(f"**{item.number}.** {item.text}")
+        lines.append(f"   _Options: {options_str}_\n")
+
+    lines.append("### Score Interpretation\n")
+    for sr in instrument.score_ranges:
+        q_str = f" (ICF qualifier: {sr.icf_qualifier})" if sr.icf_qualifier is not None else ""
+        lines.append(f"- **{sr.min_score}–{sr.max_score}**: {sr.severity} — {sr.description}{q_str}")
+
+    lines.append("\n### ICF Mappings\n")
+    primary = [m for m in instrument.icf_mappings if m.relationship == "primary"]
+    secondary = [m for m in instrument.icf_mappings if m.relationship == "secondary"]
+    related = [m for m in instrument.icf_mappings if m.relationship == "related"]
+
+    if primary:
+        lines.append("**Primary:**")
+        for m in primary:
+            lines.append(f"- {m.code}: {m.name}")
+    if secondary:
+        lines.append("**Secondary:**")
+        for m in secondary:
+            lines.append(f"- {m.code}: {m.name}")
+    if related:
+        lines.append("**Related:**")
+        for m in related:
+            lines.append(f"- {m.code}: {m.name}")
+
+    lines.append(f"\n### References\n")
+    for ref in instrument.references:
+        lines.append(f"- {ref}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def icf_score_instrument(name: str, responses: list[int]) -> str:
+    """
+    Score a completed assessment instrument and get clinical interpretation.
+
+    Pass the instrument name and a list of integer responses (one per item,
+    in order). Returns total score, severity level, ICF qualifier mapping,
+    and clinical guidance.
+
+    Args:
+        name: Instrument name or abbreviation (e.g., "GAD-7", "PHQ-9", "SLEDAI")
+        responses: List of response values, one per item in order
+            (e.g., [1, 2, 1, 0, 1, 2, 1] for GAD-7)
+
+    Returns:
+        Scored result with interpretation and ICF qualifier mapping.
+    """
+    result = inst.score_instrument(name, responses)
+
+    if "error" in result:
+        instrument = inst.resolve_instrument(name)
+        if instrument:
+            return (
+                f"**Scoring error:** {result['error']}\n\n"
+                f"**{instrument.abbreviation}** expects {len(instrument.items)} responses.\n"
+                f"Use `icf_instrument_details` with \"{name}\" to see all items."
+            )
+        return f"**Error:** {result['error']}"
+
+    lines = [
+        f"**{result['instrument']} Score: {result['total_score']}** "
+        f"(range: {result['min_possible']}–{result['max_possible']})\n",
+        f"- **Severity:** {result['severity']}",
+        f"- **Interpretation:** {result['description']}",
+    ]
+
+    if result.get("icf_qualifier") is not None:
+        q = result["icf_qualifier"]
+        q_labels = {0: "No problem", 1: "Mild", 2: "Moderate", 3: "Severe", 4: "Complete"}
+        lines.append(f"- **ICF Qualifier:** {q} — {q_labels.get(q, 'Unknown')}")
+
+    # SLEDAI-specific: organ system summary
+    if "organ_systems" in result:
+        active = [k for k, v in result["organ_systems"].items() if v]
+        if active:
+            lines.append(f"- **Active organ systems:** {', '.join(active)}")
+        lines.append(f"- **Active descriptors:** {result['active_descriptors']}/24")
+
+    # HAQ-specific: category breakdown
+    if "category_scores" in result:
+        lines.append("\n**Category scores:**")
+        for cat, score in result["category_scores"].items():
+            lines.append(f"- {cat}: {score}")
+
+    # Show mapped ICF codes
+    instrument = inst.resolve_instrument(name)
+    if instrument:
+        primary_codes = [m for m in instrument.icf_mappings if m.relationship == "primary"]
+        if primary_codes:
+            lines.append("\n**Primary ICF codes for this assessment:**")
+            for m in primary_codes[:6]:
+                lines.append(f"- {m.code}: {m.name}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def icf_suggest_instruments(
+    condition: str = "",
+    icf_code: str = "",
+    domain: str = "",
+) -> str:
+    """
+    Suggest appropriate assessment instruments for a condition, ICF code, or domain.
+
+    Finds instruments relevant to a clinical condition (e.g., "rheumatoid arthritis"),
+    a specific ICF code (e.g., "b280" for pain), or a clinical domain
+    (e.g., "Mental Health").
+
+    Args:
+        condition: Clinical condition (e.g., "rheumatoid arthritis", "depression", "COPD")
+        icf_code: ICF code to match against instrument mappings (e.g., "b280", "d450")
+        domain: Clinical domain (e.g., "Mental Health", "Rheumatology", "Pain")
+
+    Returns:
+        List of suggested instruments with rationale.
+    """
+    if not condition and not icf_code and not domain:
+        return (
+            "Please provide at least one of: condition, icf_code, or domain.\n\n"
+            "Examples:\n"
+            "- condition=\"rheumatoid arthritis\"\n"
+            "- icf_code=\"b280\" (pain)\n"
+            "- domain=\"Mental Health\""
+        )
+
+    matches: list[tuple[inst.Instrument, str]] = []
+
+    for instrument in inst.INSTRUMENTS.values():
+        reasons = []
+
+        if condition:
+            cond_lower = condition.strip().lower()
+            for c in instrument.conditions:
+                if cond_lower in c.lower() or c.lower() in cond_lower:
+                    reasons.append(f"Condition match: {c}")
+                    break
+
+        if icf_code:
+            code_lower = icf_code.strip().lower()
+            for m in instrument.icf_mappings:
+                if m.code.lower() == code_lower or m.code.lower().startswith(code_lower):
+                    reasons.append(f"Maps to {m.code} ({m.name}) [{m.relationship}]")
+                    break
+
+        if domain:
+            domain_lower = domain.strip().lower()
+            if domain_lower in instrument.domain.lower():
+                reasons.append(f"Domain: {instrument.domain}")
+
+        if reasons:
+            matches.append((instrument, "; ".join(reasons)))
+
+    if not matches:
+        query_parts = []
+        if condition:
+            query_parts.append(f"condition='{condition}'")
+        if icf_code:
+            query_parts.append(f"ICF code='{icf_code}'")
+        if domain:
+            query_parts.append(f"domain='{domain}'")
+        return (
+            f"No instruments found matching {', '.join(query_parts)}.\n\n"
+            f"Available domains: {', '.join(inst.DOMAINS)}\n"
+            f"Use `icf_list_instruments` to see all available instruments."
+        )
+
+    lines = ["**Suggested Instruments**\n"]
+    query_parts = []
+    if condition:
+        query_parts.append(f"Condition: {condition}")
+    if icf_code:
+        query_parts.append(f"ICF code: {icf_code}")
+    if domain:
+        query_parts.append(f"Domain: {domain}")
+    lines.append(f"_Query: {' · '.join(query_parts)}_\n")
+
+    for instrument, reason in sorted(matches, key=lambda x: x[0].abbreviation):
+        lines.append(
+            f"### {instrument.abbreviation}: {instrument.name}\n"
+            f"- **Why:** {reason}\n"
+            f"- **Domain:** {instrument.domain}\n"
+            f"- **Items:** {len(instrument.items)} · **Time:** {instrument.completion_time}\n"
+            f"- **RPM frequency:** {instrument.rpm_frequency}\n"
+        )
+
+    lines.append(f"*{len(matches)} instrument(s) matched. "
+                 f"Use `icf_instrument_details` for full questionnaire items.*")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def icf_instrument_icf_mapping(name: str) -> str:
+    """
+    Show how an assessment instrument maps to ICF codes.
+
+    Displays all ICF codes linked to an instrument, organized by relationship
+    type (primary, secondary, related), with code descriptions.
+
+    Args:
+        name: Instrument name or abbreviation (e.g., "GAD-7", "SLEDAI", "WHODAS")
+
+    Returns:
+        ICF code mappings organized by relationship type.
+    """
+    instrument = inst.resolve_instrument(name)
+    if not instrument:
+        available = ", ".join(i.abbreviation for i in inst.INSTRUMENTS.values())
+        return f"Unknown instrument '{name}'. Available: {available}"
+
+    lines = [
+        f"**ICF Mapping: {instrument.abbreviation} ({instrument.name})**\n",
+        f"Domain: {instrument.domain}\n",
+    ]
+
+    by_component: dict[str, list[inst.ICFMapping]] = {
+        "b": [], "s": [], "d": [], "e": [],
+    }
+    for m in instrument.icf_mappings:
+        prefix = m.code[0].lower()
+        if prefix in by_component:
+            by_component[prefix].append(m)
+
+    component_names = {
+        "b": "Body Functions",
+        "s": "Body Structures",
+        "d": "Activities and Participation",
+        "e": "Environmental Factors",
+    }
+
+    for prefix, mappings in by_component.items():
+        if mappings:
+            lines.append(f"\n### {component_names[prefix]}\n")
+            for m in mappings:
+                badge = f"[{m.relationship}]"
+                lines.append(f"- **{m.code}**: {m.name} {badge}")
+
+    # Summary stats
+    total = len(instrument.icf_mappings)
+    primary = sum(1 for m in instrument.icf_mappings if m.relationship == "primary")
+    lines.append(
+        f"\n---\n*{total} ICF codes mapped ({primary} primary). "
+        f"Use `icf_lookup` on any code for full WHO API details.*"
+    )
+
+    return "\n".join(lines)
 
 
 # =============================================================================
