@@ -8,7 +8,7 @@ the WHO ICF classification system.
 from .server import main, mcp
 from .who_client import WHOICFClient, ICFEntity, ICFSearchResult
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "main",
     "mcp", 

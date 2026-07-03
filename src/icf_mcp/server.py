@@ -11,11 +11,14 @@ describing how health conditions affect a person's functioning in daily life.
 import asyncio
 import logging
 import os
+import re
 import sys
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from .who_client import WHOICFClient, ICFEntity
+from . import instruments as inst
 
 # Configure logging to stderr (important for STDIO transport)
 logging.basicConfig(
@@ -162,40 +165,45 @@ async def icf_search(query: str, max_results: int = 10) -> str:
 @mcp.tool()
 async def icf_browse_category(category: str) -> str:
     """
-    Browse a top-level ICF category to explore available codes.
-    
-    ICF has four main categories:
-    - "b": Body Functions - physiological and psychological functions
-    - "s": Body Structures - anatomical parts of the body
-    - "d": Activities and Participation - task execution and life involvement
-    - "e": Environmental Factors - physical, social, attitudinal environment
-    
+    Browse an ICF category or sub-chapter to explore available codes.
+
+    Accepts top-level components or sub-chapter codes:
+    - "b", "s", "d", "e": Top-level components
+    - "b1": Mental functions chapter
+    - "b2": Sensory functions and pain
+    - "d4": Mobility chapter
+    - "e1": Products and technology
+    - Any valid sub-chapter code (e.g., "b1", "s7", "d45", "e3")
+
     Args:
-        category: Single letter category code (b, s, d, or e)
-        
+        category: Component letter (b, s, d, e) or sub-chapter code (b1, d4, etc.)
+
     Returns:
-        Overview of the category with example codes and chapters.
+        Overview of the category/sub-chapter with child codes.
     """
     client = get_client()
-    
+
     try:
         result = await client.browse_category(category)
-        
+
         lines = [
             f"**ICF Category: {result['name']}** (codes starting with '{result['category']}')",
             "",
             result["description"],
             "",
-            "**Sample codes in this category:**",
         ]
-        
-        for item in result["results"][:10]:
-            lines.append(f"  - **{item['code']}**: {item['title']}")
-        
-        lines.append(f"\nUse `icf_search` or `icf_lookup` for more specific codes.")
-        
+
+        if result["results"]:
+            lines.append("**Codes in this category:**")
+            for item in result["results"][:20]:
+                lines.append(f"  - **{item['code']}**: {item['title']}")
+        else:
+            lines.append("*No child codes found — this may be a leaf-level code.*")
+
+        lines.append(f"\nUse `icf_get_children` to drill deeper, or `icf_lookup` for full details.")
+
         return "\n".join(lines)
-        
+
     except ValueError as e:
         return str(e)
     except Exception as e:
@@ -242,42 +250,103 @@ async def icf_get_children(code: str) -> str:
 
 
 @mcp.tool()
-async def icf_explain_qualifier(qualifier: int) -> str:
+async def icf_explain_qualifier(component: str = "generic", qualifier: int | None = None) -> str:
     """
-    Explain ICF qualifier values used to rate severity of impairment.
-    
-    ICF uses qualifiers (0-4, 8, 9) to indicate the magnitude of a problem:
-    
+    Explain ICF qualifier systems. Each ICF component uses different qualifiers.
+
+    ICF qualifier types vary by component:
+    - Body Functions (b): 1 qualifier — extent of impairment (0-4)
+    - Body Structures (s): 3 qualifiers — extent, nature of change, location
+    - Activities & Participation (d): 2 qualifiers — performance, capacity
+    - Environmental Factors (e): 1 qualifier — barrier (0-4) or facilitator (+0 to +4)
+
     Args:
-        qualifier: The qualifier value (0-4, 8, or 9)
-        
+        component: Component to explain qualifiers for. One of:
+            "generic" (default severity scale), "b" (body functions),
+            "s" (body structures), "d" (activities & participation),
+            "e" (environmental factors)
+        qualifier: Optional specific qualifier value to explain (0-9).
+            If omitted, shows all qualifiers for the component.
+
     Returns:
-        Explanation of what the qualifier value means.
+        Explanation of qualifier system for the specified component.
     """
-    qualifiers = {
-        0: ("No problem", "0-4%", "None, absent, negligible"),
-        1: ("Mild problem", "5-24%", "Slight, low"),
-        2: ("Moderate problem", "25-49%", "Medium, fair"),
-        3: ("Severe problem", "50-95%", "High, extreme"),
-        4: ("Complete problem", "96-100%", "Total"),
-        8: ("Not specified", "N/A", "Insufficient information to specify severity"),
-        9: ("Not applicable", "N/A", "Inappropriate to apply this code"),
-    }
-    
-    if qualifier not in qualifiers:
-        return (
-            f"Invalid qualifier '{qualifier}'. "
-            f"Valid values are: 0 (no problem), 1 (mild), 2 (moderate), "
-            f"3 (severe), 4 (complete), 8 (not specified), 9 (not applicable)"
-        )
-    
-    level, percentage, description = qualifiers[qualifier]
-    
+    comp = component.strip().lower()
+
+    if comp == "generic" or comp == "b":
+        label = "Body Functions (b) — Extent of Impairment" if comp == "b" else "Generic Severity Scale"
+        if qualifier is not None:
+            if qualifier not in _GENERIC_SCALE:
+                return f"Invalid qualifier value '{qualifier}'. Valid: 0-4, 8, 9."
+            level, pct, desc = _GENERIC_SCALE[qualifier]
+            example = f"b280.{qualifier}" if comp == "b" else f"d450.{qualifier}"
+            return (
+                f"**{label} — Qualifier {qualifier}: {level}**\n\n"
+                f"- **Percentage range:** {pct}\n"
+                f"- **Description:** {desc}\n\n"
+                f"Example: {example} means '{level.lower()}'."
+            )
+        lines = [f"**{label}**\n"]
+        for val, (level, pct, desc) in _GENERIC_SCALE.items():
+            lines.append(f"- **{val}**: {level} ({pct}) — {desc}")
+        if comp == "b":
+            lines.append("\nBody Functions use a single qualifier: b280.**2** = moderate impairment.")
+        return "\n".join(lines)
+
+    if comp == "s":
+        lines = [
+            "**Body Structures (s) — 3 Qualifiers**\n",
+            "Body Structure codes use three qualifiers: `s{code}.{extent}{nature}{location}`\n",
+            "Example: **s730.312** = structure of lower extremity, severe impairment (3),",
+            "total absence (1), right side (2)\n",
+            "### 1st Qualifier: Extent of Impairment\n",
+        ]
+        for val, (level, pct, desc) in _GENERIC_SCALE.items():
+            lines.append(f"- **{val}**: {level} ({pct})")
+        lines.append("\n### 2nd Qualifier: Nature of Change\n")
+        for val, desc in _NATURE_OF_CHANGE.items():
+            lines.append(f"- **{val}**: {desc}")
+        lines.append("\n### 3rd Qualifier: Location\n")
+        for val, desc in _LOCATION.items():
+            lines.append(f"- **{val}**: {desc}")
+        return "\n".join(lines)
+
+    if comp == "d":
+        lines = [
+            "**Activities & Participation (d) — 2 Qualifiers**\n",
+            "Activity/Participation codes use two qualifiers: `d{code}.{performance}{capacity}`\n",
+            "- **Performance**: what a person *does* in their current environment",
+            "- **Capacity**: what a person *can do* in a standardized environment\n",
+            "Example: **d450.23** = walking, moderate difficulty in performance (2),",
+            "severe limitation in capacity (3)\n",
+            "### Both qualifiers use the standard severity scale:\n",
+        ]
+        for val, (level, pct, desc) in _GENERIC_SCALE.items():
+            lines.append(f"- **{val}**: {level} ({pct})")
+        return "\n".join(lines)
+
+    if comp == "e":
+        lines = [
+            "**Environmental Factors (e) — 1 Qualifier (Barrier or Facilitator)**\n",
+            "Environmental codes use a single qualifier with two directions:\n",
+            "- **Barriers** use a dot: `e{code}.{value}` (e.g., e120.2 = moderate barrier)",
+            "- **Facilitators** use a plus: `e{code}+{value}` (e.g., e120+3 = substantial facilitator)\n",
+            "### Barrier Scale (negative influence)\n",
+        ]
+        for val in _BARRIER_SCALE:
+            lines.append(f"- **.{val}**: {_scale_meaning(_BARRIER_SCALE, val)}")
+        lines.append("\n### Facilitator Scale (positive influence)\n")
+        for val in _FACILITATOR_SCALE:
+            lines.append(f"- **+{val}**: {_scale_meaning(_FACILITATOR_SCALE, val)}")
+        return "\n".join(lines)
+
     return (
-        f"**ICF Qualifier {qualifier}: {level}**\n\n"
-        f"- **Percentage range:** {percentage}\n"
-        f"- **Description:** {description}\n\n"
-        f"Example: d450.{qualifier} means '{level.lower()}' difficulty with walking."
+        f"Unknown component '{component}'. Valid values:\n"
+        f"- `generic`: Standard severity scale (default)\n"
+        f"- `b`: Body Functions (1 qualifier)\n"
+        f"- `s`: Body Structures (3 qualifiers)\n"
+        f"- `d`: Activities & Participation (2 qualifiers)\n"
+        f"- `e`: Environmental Factors (barrier/facilitator)"
     )
 
 
@@ -344,25 +413,924 @@ Physical, social and attitudinal environment.
 
 ## Qualifiers
 
-Severity is rated on a scale:
-- 0: No problem (0-4%)
-- 1: Mild problem (5-24%)
-- 2: Moderate problem (25-49%)
-- 3: Severe problem (50-95%)
-- 4: Complete problem (96-100%)
+Each component has its own qualifier system:
+
+**Body Functions (b):** 1 qualifier — extent of impairment (0-4)
+  Example: b280.2 = moderate pain impairment
+
+**Body Structures (s):** 3 qualifiers — extent, nature of change, location
+  Example: s730.312 = severe extent, total absence, right side
+
+**Activities & Participation (d):** 2 qualifiers — performance, capacity
+  Example: d450.23 = moderate performance difficulty, severe capacity limitation
+
+**Environmental Factors (e):** barriers (.) or facilitators (+)
+  Example: e120.2 = moderate barrier; e120+3 = substantial facilitator
+
+Generic severity scale (0-4): 0=none, 1=mild, 2=moderate, 3=severe, 4=complete
 
 ## Tools Available
 
 - `icf_lookup`: Get details for a specific code
 - `icf_search`: Find codes by keyword
-- `icf_browse_category`: Explore a category
-- `icf_get_children`: Get subcodes
-- `icf_explain_qualifier`: Understand severity ratings
+- `icf_browse_category`: Explore a category or sub-chapter (b, d4, e3, etc.)
+- `icf_get_children`: Get subcodes of a code
+- `icf_get_parent`: Navigate up to a code's parent category
+- `icf_get_siblings`: Find related codes at the same level
+- `icf_get_code_chain`: Show the full hierarchy path from root to a code
+- `icf_validate_code`: Validate a code with qualifier support
+- `icf_parse_qualified_code`: Parse qualified codes (d450.23, s730.312, e120+3)
+- `icf_build_profile`: Build a functional profile from multiple codes
+- `icf_explain_qualifier`: Component-specific qualifier reference
 
 ## More Information
 
 ICF official site: https://www.who.int/standards/classifications/international-classification-of-functioning-disability-and-health
 """
+
+
+@mcp.tool()
+async def icf_get_parent(code: str) -> str:
+    """
+    Get the parent category of an ICF code to navigate up the hierarchy.
+
+    ICF codes are hierarchical. Use this to move from a specific code up to
+    its broader category. For example:
+    - d4501 → d450 (Walking)
+    - d450 → d45 (Walking and moving)
+    - d45 → d4 (Mobility)
+
+    Args:
+        code: ICF code to find the parent of (e.g., "d450", "b2801")
+
+    Returns:
+        Parent code details and the relationship to the child code.
+    """
+    client = get_client()
+
+    try:
+        entity, parent = await client.get_parent(code)
+
+        if entity is None:
+            return f"ICF code '{code}' not found. Please check the code format."
+
+        if parent is None:
+            return (
+                f"**{entity.code}**: {entity.title}\n\n"
+                f"This is a top-level code with no parent category."
+            )
+
+        lines = [
+            f"**Parent of {entity.code} ({entity.title}):**\n",
+            format_entity(parent),
+        ]
+
+        if parent.children:
+            lines.append(f"\n*{parent.code} has {len(parent.children)} child code(s). "
+                         f"Use `icf_get_children` on '{parent.code}' to see all.*")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        logger.error(f"Error getting parent for ICF code {code}: {e}")
+        return f"Error getting parent: {str(e)}"
+
+
+@mcp.tool()
+async def icf_get_siblings(code: str) -> str:
+    """
+    Get sibling codes — other codes at the same level sharing the same parent.
+
+    Useful for finding related or alternative codes. For example, siblings of
+    d450 (Walking) include d455 (Moving around) and d460 (Moving around in
+    different locations).
+
+    Args:
+        code: ICF code to find siblings for (e.g., "d450", "b280")
+
+    Returns:
+        List of sibling codes with titles.
+    """
+    client = get_client()
+
+    try:
+        entity, siblings = await client.get_siblings(code)
+
+        if entity is None:
+            return f"ICF code '{code}' not found. Please check the code format."
+
+        if not siblings:
+            return (
+                f"**{entity.code}**: {entity.title}\n\n"
+                f"No sibling codes found (this may be the only child of its parent)."
+            )
+
+        lines = [
+            f"**Siblings of {entity.code} ({entity.title}):**\n",
+        ]
+
+        for sibling in siblings:
+            lines.append(f"- **{sibling.code}**: {sibling.title}")
+
+        lines.append(f"\n*{len(siblings)} sibling(s) found.*")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        logger.error(f"Error getting siblings for ICF code {code}: {e}")
+        return f"Error getting siblings: {str(e)}"
+
+
+# =============================================================================
+# Qualifier parsing helpers
+# =============================================================================
+
+# Component names
+_COMPONENTS = {
+    "b": "Body Functions",
+    "s": "Body Structures",
+    "d": "Activities and Participation",
+    "e": "Environmental Factors",
+}
+
+# Hierarchy level names
+_LEVELS = {
+    1: "Chapter (1st level)",
+    2: "Block (2nd level)",
+    3: "Category (3rd level)",
+    4: "Subcategory (4th level)",
+}
+
+# Generic severity scale (used by b, s-1st, d-performance, d-capacity)
+# value → (label, percentage range, description)
+_GENERIC_SCALE = {
+    0: ("No problem", "0-4%", "None, absent, negligible"),
+    1: ("Mild problem", "5-24%", "Slight, low"),
+    2: ("Moderate problem", "25-49%", "Medium, fair"),
+    3: ("Severe problem", "50-95%", "High, extreme"),
+    4: ("Complete problem", "96-100%", "Total"),
+    8: ("Not specified", "N/A", "Insufficient information to specify severity"),
+    9: ("Not applicable", "N/A", "Inappropriate to apply this code"),
+}
+
+# Body Structures — 2nd qualifier: nature of change
+_NATURE_OF_CHANGE = {
+    0: "No change in structure",
+    1: "Total absence",
+    2: "Partial absence",
+    3: "Additional part",
+    4: "Aberrant dimensions",
+    5: "Discontinuity",
+    6: "Deviating position",
+    7: "Qualitative changes in structure",
+    8: "Not specified",
+    9: "Not applicable",
+}
+
+# Body Structures — 3rd qualifier: location
+_LOCATION = {
+    0: "More than one region",
+    1: "Right",
+    2: "Left",
+    3: "Both sides",
+    4: "Front",
+    5: "Back",
+    6: "Proximal",
+    7: "Distal",
+    8: "Not specified",
+    9: "Not applicable",
+}
+
+# Environmental Factors — barrier scale: value → (label, percentage range)
+_BARRIER_SCALE = {
+    0: ("No barrier", "0-4%"),
+    1: ("Mild barrier", "5-24%"),
+    2: ("Moderate barrier", "25-49%"),
+    3: ("Severe barrier", "50-95%"),
+    4: ("Complete barrier", "96-100%"),
+    8: ("Not specified", "N/A"),
+    9: ("Not applicable", "N/A"),
+}
+
+# Environmental Factors — facilitator scale: value → (label, percentage range)
+_FACILITATOR_SCALE = {
+    0: ("No facilitator", "0-4%"),
+    1: ("Mild facilitator", "5-24%"),
+    2: ("Moderate facilitator", "25-49%"),
+    3: ("Substantial facilitator", "50-95%"),
+    4: ("Complete facilitator", "96-100%"),
+    8: ("Not specified", "N/A"),
+    9: ("Not applicable", "N/A"),
+}
+
+
+def _scale_meaning(scale: dict[int, Any], value: int) -> str:
+    """Render a qualifier scale entry as 'Label (pct)' or a bare label."""
+    entry = scale.get(value)
+    if entry is None:
+        return "Unknown"
+    if isinstance(entry, tuple):
+        label, pct = entry[0], entry[1]
+        return f"{label} ({pct})" if pct != "N/A" else label
+    return entry
+
+
+def _parse_icf_code(raw: str) -> dict[str, Any]:
+    """
+    Parse a raw ICF code string (with or without qualifiers) into its components.
+
+    Supports formats:
+        b280, d450.2, d450.23, s730.312, e120.2, e120+3
+
+    Returns a dict with keys:
+        base_code, component, component_name, digits, level,
+        qualifier_str, separator, is_facilitator, qualifiers (list of dicts),
+        error (str or None)
+    """
+    raw = raw.strip()
+
+    # Full pattern: component + digits + optional separator + qualifier digits
+    # Separators: "." for barriers/impairments, "+" for facilitators
+    pattern = r'^([bBsSdDeE])(\d{1,4})(?:([.+])(\d+))?$'
+    match = re.match(pattern, raw)
+
+    if not match:
+        return {"error": (
+            f"'{raw}' does not match ICF code format.\n\n"
+            f"**Base code:** `[bsde]` + 1-4 digits (e.g., b280, d450)\n"
+            f"**With qualifiers:** code + `.` or `+` + qualifier digits\n"
+            f"  - b280.2 (body function, moderate impairment)\n"
+            f"  - d450.23 (activity, performance=2, capacity=3)\n"
+            f"  - s730.312 (structure, extent=3, nature=1, location=2)\n"
+            f"  - e120.2 (environment, moderate barrier)\n"
+            f"  - e120+3 (environment, substantial facilitator)"
+        )}
+
+    component = match.group(1).lower()
+    digits = match.group(2)
+    separator = match.group(3)  # "." or "+" or None
+    qualifier_str = match.group(4)  # "2", "23", "312", or None
+
+    base_code = f"{component}{digits}"
+    component_name = _COMPONENTS[component]
+    level = _LEVELS.get(len(digits), "Unknown")
+    is_facilitator = separator == "+"
+
+    result: dict[str, Any] = {
+        "base_code": base_code,
+        "component": component,
+        "component_name": component_name,
+        "digits": digits,
+        "level": level,
+        "qualifier_str": qualifier_str,
+        "separator": separator,
+        "is_facilitator": is_facilitator,
+        "qualifiers": [],
+        "error": None,
+    }
+
+    if not qualifier_str:
+        return result
+
+    # Parse qualifiers based on component
+    qdigits = [int(d) for d in qualifier_str]
+
+    if component == "b":
+        # Body Functions: 1 qualifier (extent of impairment)
+        if len(qdigits) > 1:
+            result["error"] = (
+                f"Body Functions (b) use 1 qualifier: extent of impairment. "
+                f"Got {len(qdigits)} digits ('{qualifier_str}')."
+            )
+            return result
+        result["qualifiers"] = [
+            {"name": "Extent of impairment", "value": qdigits[0],
+             "meaning": _scale_meaning(_GENERIC_SCALE, qdigits[0])}
+        ]
+
+    elif component == "s":
+        # Body Structures: up to 3 qualifiers
+        if len(qdigits) > 3:
+            result["error"] = (
+                f"Body Structures (s) use up to 3 qualifiers. "
+                f"Got {len(qdigits)} digits ('{qualifier_str}')."
+            )
+            return result
+        scales = [
+            ("Extent of impairment", _GENERIC_SCALE),
+            ("Nature of change", _NATURE_OF_CHANGE),
+            ("Location", _LOCATION),
+        ]
+        for i, val in enumerate(qdigits):
+            name, scale = scales[i]
+            result["qualifiers"].append({
+                "name": name, "value": val,
+                "meaning": _scale_meaning(scale, val),
+            })
+
+    elif component == "d":
+        # Activities & Participation: up to 2 qualifiers
+        if len(qdigits) > 2:
+            result["error"] = (
+                f"Activities & Participation (d) use up to 2 qualifiers. "
+                f"Got {len(qdigits)} digits ('{qualifier_str}')."
+            )
+            return result
+        names = ["Performance", "Capacity"]
+        for i, val in enumerate(qdigits):
+            result["qualifiers"].append({
+                "name": names[i], "value": val,
+                "meaning": _scale_meaning(_GENERIC_SCALE, val),
+            })
+
+    elif component == "e":
+        # Environmental Factors: 1 qualifier (barrier or facilitator)
+        if len(qdigits) > 1:
+            result["error"] = (
+                f"Environmental Factors (e) use 1 qualifier. "
+                f"Got {len(qdigits)} digits ('{qualifier_str}')."
+            )
+            return result
+        scale = _FACILITATOR_SCALE if is_facilitator else _BARRIER_SCALE
+        label = "Facilitator" if is_facilitator else "Barrier"
+        result["qualifiers"] = [
+            {"name": label, "value": qdigits[0],
+             "meaning": _scale_meaning(scale, qdigits[0])}
+        ]
+
+    return result
+
+
+@mcp.tool()
+async def icf_validate_code(code: str) -> str:
+    """
+    Validate an ICF code — check format, qualifiers, and verify it exists.
+
+    Supports both base codes and fully qualified codes with qualifiers:
+    - Base: "b280", "d4501"
+    - Qualified: "b280.2", "d450.23", "s730.312", "e120+3"
+
+    Args:
+        code: ICF code to validate (e.g., "b280", "d450.23", "s730.312")
+
+    Returns:
+        Code analysis with format validation, qualifier breakdown, and API verification.
+    """
+    parsed = _parse_icf_code(code)
+
+    if parsed.get("error") and "base_code" not in parsed:
+        return parsed["error"]
+
+    base_code = parsed["base_code"]
+    component = parsed["component"]
+    component_name = parsed["component_name"]
+    level = parsed["level"]
+    digits = parsed["digits"]
+
+    lines = [
+        f"**Code Analysis: {code.strip()}**\n",
+        f"- **Base code:** {base_code}",
+        f"- **Component:** {component_name} ({component})",
+        f"- **Level:** {level}",
+        f"- **Chapter:** {component}{digits[0]}",
+    ]
+
+    # Show qualifier breakdown
+    if parsed.get("error"):
+        lines.append(f"\n**Qualifier error:** {parsed['error']}")
+    elif parsed["qualifiers"]:
+        lines.append("\n**Qualifiers:**")
+        for q in parsed["qualifiers"]:
+            lines.append(f"- **{q['name']}:** {q['value']} — {q['meaning']}")
+
+    # Verify base code against the WHO API
+    client = get_client()
+    try:
+        entity = await client.get_entity_by_code(base_code)
+        if entity:
+            lines.append(f"\n**Valid:** Base code confirmed in WHO ICD-API.")
+            lines.append(f"- **Title:** {entity.title}")
+            if entity.definition:
+                lines.append(f"- **Definition:** {entity.definition}")
+            if entity.children:
+                lines.append(f"- **Children:** {len(entity.children)} subcategory code(s)")
+        else:
+            lines.append(
+                f"\n**Not found** in the WHO API. The format is valid but this "
+                f"code may not exist in the current release."
+            )
+    except Exception:
+        lines.append(f"\n**Could not verify** against the WHO API.")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def icf_parse_qualified_code(code: str) -> str:
+    """
+    Parse a fully qualified ICF code and explain each qualifier component.
+
+    Qualified ICF codes encode severity/characteristics after the base code:
+    - b280.2 → Body Functions: moderate impairment
+    - d450.23 → Activities: performance=moderate, capacity=severe
+    - s730.312 → Structures: severe extent, total absence, right side
+    - e120.2 → Environment: moderate barrier
+    - e120+3 → Environment: substantial facilitator
+
+    Args:
+        code: Fully qualified ICF code (e.g., "d450.23", "s730.312", "e120+3")
+
+    Returns:
+        Detailed breakdown of the code and all qualifier values.
+    """
+    parsed = _parse_icf_code(code)
+
+    if parsed.get("error") and "base_code" not in parsed:
+        return parsed["error"]
+
+    base_code = parsed["base_code"]
+    component_name = parsed["component_name"]
+
+    lines = [f"**Parsed: {code.strip()}**\n"]
+
+    # Look up the base code
+    client = get_client()
+    try:
+        entity = await client.get_entity_by_code(base_code)
+        if entity:
+            lines.append(f"**{base_code}**: {entity.title}")
+            if entity.definition:
+                lines.append(f"_{entity.definition}_\n")
+            else:
+                lines.append("")
+        else:
+            lines.append(f"**{base_code}**: *(not found in WHO API)*\n")
+    except Exception:
+        lines.append(f"**{base_code}**: *(could not verify)*\n")
+
+    lines.append(f"**Component:** {component_name}")
+
+    if parsed.get("error"):
+        lines.append(f"\n**Qualifier error:** {parsed['error']}")
+    elif parsed["qualifiers"]:
+        lines.append(f"\n**Qualifiers:**\n")
+        for q in parsed["qualifiers"]:
+            lines.append(f"- **{q['name']}** (value {q['value']}): {q['meaning']}")
+    else:
+        lines.append("\n*No qualifiers specified. Use `icf_explain_qualifier` "
+                     f"with component=\"{parsed['component']}\" to see available qualifiers.*")
+
+    # Show the expected qualifier pattern for this component
+    patterns = {
+        "b": "b{code}.{extent}",
+        "s": "s{code}.{extent}{nature}{location}",
+        "d": "d{code}.{performance}{capacity}",
+        "e": "e{code}.{barrier}  or  e{code}+{facilitator}",
+    }
+    lines.append(f"\n**Qualifier format for {component_name}:** `{patterns[parsed['component']]}`")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def icf_build_profile(codes: list[str]) -> str:
+    """
+    Build an ICF functional profile from multiple codes.
+
+    Creates a structured summary organizing multiple ICF codes by component,
+    useful for documenting a person's functional status across body functions,
+    structures, activities, and environmental factors.
+
+    Args:
+        codes: List of ICF codes (e.g., ["b280", "d450", "e120"])
+
+    Returns:
+        Structured ICF profile organized by component.
+    """
+    if not codes:
+        return "No codes provided. Pass a list of ICF codes (e.g., [\"b280\", \"d450\"])."
+
+    client = get_client()
+
+    components: dict[str, dict] = {
+        prefix: {"name": name, "items": []} for prefix, name in _COMPONENTS.items()
+    }
+
+    not_found: list[str] = []
+
+    cleaned = [code.strip().lower() for code in codes]
+    entities = await asyncio.gather(
+        *(client.get_entity_by_code(c) for c in cleaned)
+    )
+
+    for code, code_clean, entity in zip(codes, cleaned, entities):
+        if entity and code_clean[:1] in components:
+            components[code_clean[0]]["items"].append(entity)
+        else:
+            not_found.append(code)
+
+    lines = ["**ICF Functional Profile**\n"]
+
+    for comp in components.values():
+        if comp["items"]:
+            lines.append(f"\n### {comp['name']}\n")
+            for entity in comp["items"]:
+                lines.append(f"- **{entity.code}**: {entity.title}")
+                if entity.definition:
+                    lines.append(f"  _{entity.definition}_")
+
+    if not_found:
+        lines.append(f"\n**Codes not found:** {', '.join(not_found)}")
+
+    total = sum(len(c["items"]) for c in components.values())
+    active = sum(1 for c in components.values() if c["items"])
+    lines.append(f"\n---\n*Profile contains {total} code(s) across {active} component(s).*")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def icf_get_code_chain(code: str) -> str:
+    """
+    Show the full hierarchical path from the ICF root down to a specific code.
+
+    Displays the complete classification chain as a breadcrumb trail, useful for
+    understanding where a code sits in the overall ICF structure. For example,
+    d4501 might show: Activities and Participation → Mobility → Walking and
+    moving → Walking → Walking long distances.
+
+    Args:
+        code: ICF code to trace (e.g., "b2801", "d4501")
+
+    Returns:
+        Hierarchical chain from root to the specified code.
+    """
+    client = get_client()
+
+    try:
+        chain = await client.get_code_chain(code)
+
+        if not chain:
+            return f"ICF code '{code}' not found. Please check the code format."
+
+        if len(chain) == 1:
+            entity = chain[0]
+            return f"**{entity.code}**: {entity.title}\n\nThis is a top-level code."
+
+        lines = [f"**Hierarchy for {code}:**\n"]
+
+        for i, entity in enumerate(chain):
+            indent = "  " * i
+            if i == len(chain) - 1:
+                # Final (target) code — show full details
+                lines.append(f"{indent}→ **{entity.code}**: {entity.title}")
+                if entity.definition:
+                    lines.append(f"{indent}  _{entity.definition}_")
+            else:
+                lines.append(f"{indent}→ {entity.code}: {entity.title}")
+
+        lines.append(f"\n*{len(chain)} level(s) deep.*")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        logger.error(f"Error getting code chain for {code}: {e}")
+        return f"Error getting code chain: {str(e)}"
+
+
+# =============================================================================
+# Assessment Instrument Tools
+# =============================================================================
+
+@mcp.tool()
+async def icf_list_instruments(domain: str = "") -> str:
+    """
+    List available standardized assessment instruments.
+
+    Instruments are clinical questionnaires (GAD-7, PHQ-9, RADAI-5, SLEDAI,
+    WHODAS 2.0, etc.) used for RPM patient assessment, each mapped to ICF codes.
+
+    Args:
+        domain: Optional filter by domain (e.g., "Mental Health", "Rheumatology",
+            "Pain", "Respiratory", "General"). Leave empty for all instruments.
+
+    Returns:
+        Table of available instruments with key details.
+    """
+    instruments = list(inst.INSTRUMENTS.values())
+
+    if domain:
+        domain_lower = domain.strip().lower()
+        instruments = [i for i in instruments if domain_lower in i.domain.lower()]
+
+    if not instruments:
+        return (
+            f"No instruments found for domain '{domain}'.\n\n"
+            f"Available domains: {', '.join(inst.DOMAINS)}"
+        )
+
+    lines = ["**Available Assessment Instruments**\n"]
+    if domain:
+        lines[0] = f"**Assessment Instruments — {domain}**\n"
+
+    for i in sorted(instruments, key=lambda x: (x.domain, x.abbreviation)):
+        lines.append(
+            f"- **{i.abbreviation}** — {i.name}\n"
+            f"  {i.domain} · {len(i.items)} items · {i.completion_time} · "
+            f"Recall: {i.recall_period} · RPM: {i.rpm_frequency}"
+        )
+
+    lines.append(f"\n*{len(instruments)} instrument(s). "
+                 f"Use `icf_instrument_details` for full item text and scoring.*")
+    lines.append(f"\n**Domains:** {', '.join(inst.DOMAINS)}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def icf_instrument_details(name: str) -> str:
+    """
+    Get full details of a clinical assessment instrument.
+
+    Shows all questionnaire items, response options, scoring method, score
+    interpretation ranges, and ICF code mappings.
+
+    Args:
+        name: Instrument name or abbreviation (e.g., "GAD-7", "PHQ-9",
+            "RADAI-5", "SLEDAI", "WHODAS", "HAQ", "ODI", "CAT", "NRS")
+
+    Returns:
+        Complete instrument specification.
+    """
+    instrument = inst.resolve_instrument(name)
+    if not instrument:
+        available = ", ".join(i.abbreviation for i in inst.INSTRUMENTS.values())
+        return f"Unknown instrument '{name}'. Available: {available}"
+
+    lines = [
+        f"**{instrument.abbreviation}: {instrument.name}**\n",
+        instrument.description,
+        "",
+        f"- **Domain:** {instrument.domain}",
+        f"- **Conditions:** {', '.join(instrument.conditions)}",
+        f"- **Items:** {len(instrument.items)}",
+        f"- **Score range:** {instrument.min_score}–{instrument.max_score}",
+        f"- **Scoring:** {instrument.scoring_method}",
+        f"- **Recall period:** {instrument.recall_period}",
+        f"- **Administration:** {instrument.administration}",
+        f"- **Completion time:** {instrument.completion_time}",
+        f"- **RPM frequency:** {instrument.rpm_frequency}",
+    ]
+
+    if instrument.notes:
+        lines.append(f"- **Notes:** {instrument.notes}")
+
+    lines.append("\n### Items\n")
+    for item in instrument.items:
+        options_str = " | ".join(f"{o.value}={o.label}" for o in item.options)
+        lines.append(f"**{item.number}.** {item.text}")
+        lines.append(f"   _Options: {options_str}_\n")
+
+    lines.append("### Score Interpretation\n")
+    for sr in instrument.score_ranges:
+        q_str = f" (ICF qualifier: {sr.icf_qualifier})" if sr.icf_qualifier is not None else ""
+        lines.append(f"- **{sr.min_score}–{sr.max_score}**: {sr.severity} — {sr.description}{q_str}")
+
+    lines.append("\n### ICF Mappings\n")
+    primary = [m for m in instrument.icf_mappings if m.relationship == "primary"]
+    secondary = [m for m in instrument.icf_mappings if m.relationship == "secondary"]
+    related = [m for m in instrument.icf_mappings if m.relationship == "related"]
+
+    if primary:
+        lines.append("**Primary:**")
+        for m in primary:
+            lines.append(f"- {m.code}: {m.name}")
+    if secondary:
+        lines.append("**Secondary:**")
+        for m in secondary:
+            lines.append(f"- {m.code}: {m.name}")
+    if related:
+        lines.append("**Related:**")
+        for m in related:
+            lines.append(f"- {m.code}: {m.name}")
+
+    lines.append(f"\n### References\n")
+    for ref in instrument.references:
+        lines.append(f"- {ref}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def icf_score_instrument(name: str, responses: list[int]) -> str:
+    """
+    Score a completed assessment instrument and get clinical interpretation.
+
+    Pass the instrument name and a list of integer responses (one per item,
+    in order). Returns total score, severity level, ICF qualifier mapping,
+    and clinical guidance.
+
+    Args:
+        name: Instrument name or abbreviation (e.g., "GAD-7", "PHQ-9", "SLEDAI")
+        responses: List of response values, one per item in order
+            (e.g., [1, 2, 1, 0, 1, 2, 1] for GAD-7)
+
+    Returns:
+        Scored result with interpretation and ICF qualifier mapping.
+    """
+    result = inst.score_instrument(name, responses)
+
+    if "error" in result:
+        instrument = inst.resolve_instrument(name)
+        if instrument:
+            return (
+                f"**Scoring error:** {result['error']}\n\n"
+                f"**{instrument.abbreviation}** expects {len(instrument.items)} responses.\n"
+                f"Use `icf_instrument_details` with \"{name}\" to see all items."
+            )
+        return f"**Error:** {result['error']}"
+
+    lines = [
+        f"**{result['instrument']} Score: {result['total_score']}** "
+        f"(range: {result['min_possible']}–{result['max_possible']})\n",
+        f"- **Severity:** {result['severity']}",
+        f"- **Interpretation:** {result['description']}",
+    ]
+
+    if result.get("icf_qualifier") is not None:
+        q = result["icf_qualifier"]
+        q_label = _GENERIC_SCALE[q][0] if q in _GENERIC_SCALE else "Unknown"
+        lines.append(f"- **ICF Qualifier:** {q} — {q_label}")
+
+    # SLEDAI-specific: organ system summary
+    if "organ_systems" in result:
+        active = [k for k, v in result["organ_systems"].items() if v]
+        if active:
+            lines.append(f"- **Active organ systems:** {', '.join(active)}")
+        lines.append(f"- **Active descriptors:** {result['active_descriptors']}/24")
+
+    # HAQ-specific: category breakdown
+    if "category_scores" in result:
+        lines.append("\n**Category scores:**")
+        for cat, score in result["category_scores"].items():
+            lines.append(f"- {cat}: {score}")
+
+    # Show mapped ICF codes
+    instrument = inst.resolve_instrument(name)
+    if instrument:
+        primary_codes = [m for m in instrument.icf_mappings if m.relationship == "primary"]
+        if primary_codes:
+            lines.append("\n**Primary ICF codes for this assessment:**")
+            for m in primary_codes[:6]:
+                lines.append(f"- {m.code}: {m.name}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def icf_suggest_instruments(
+    condition: str = "",
+    icf_code: str = "",
+    domain: str = "",
+) -> str:
+    """
+    Suggest appropriate assessment instruments for a condition, ICF code, or domain.
+
+    Finds instruments relevant to a clinical condition (e.g., "rheumatoid arthritis"),
+    a specific ICF code (e.g., "b280" for pain), or a clinical domain
+    (e.g., "Mental Health").
+
+    Args:
+        condition: Clinical condition (e.g., "rheumatoid arthritis", "depression", "COPD")
+        icf_code: ICF code to match against instrument mappings (e.g., "b280", "d450")
+        domain: Clinical domain (e.g., "Mental Health", "Rheumatology", "Pain")
+
+    Returns:
+        List of suggested instruments with rationale.
+    """
+    if not condition and not icf_code and not domain:
+        return (
+            "Please provide at least one of: condition, icf_code, or domain.\n\n"
+            "Examples:\n"
+            "- condition=\"rheumatoid arthritis\"\n"
+            "- icf_code=\"b280\" (pain)\n"
+            "- domain=\"Mental Health\""
+        )
+
+    matches: list[tuple[inst.Instrument, str]] = []
+
+    for instrument in inst.INSTRUMENTS.values():
+        reasons = []
+
+        if condition:
+            cond_lower = condition.strip().lower()
+            for c in instrument.conditions:
+                if cond_lower in c.lower() or c.lower() in cond_lower:
+                    reasons.append(f"Condition match: {c}")
+                    break
+
+        if icf_code:
+            code_lower = icf_code.strip().lower()
+            for m in instrument.icf_mappings:
+                if m.code.lower() == code_lower or m.code.lower().startswith(code_lower):
+                    reasons.append(f"Maps to {m.code} ({m.name}) [{m.relationship}]")
+                    break
+
+        if domain:
+            domain_lower = domain.strip().lower()
+            if domain_lower in instrument.domain.lower():
+                reasons.append(f"Domain: {instrument.domain}")
+
+        if reasons:
+            matches.append((instrument, "; ".join(reasons)))
+
+    if not matches:
+        query_parts = []
+        if condition:
+            query_parts.append(f"condition='{condition}'")
+        if icf_code:
+            query_parts.append(f"ICF code='{icf_code}'")
+        if domain:
+            query_parts.append(f"domain='{domain}'")
+        return (
+            f"No instruments found matching {', '.join(query_parts)}.\n\n"
+            f"Available domains: {', '.join(inst.DOMAINS)}\n"
+            f"Use `icf_list_instruments` to see all available instruments."
+        )
+
+    lines = ["**Suggested Instruments**\n"]
+    query_parts = []
+    if condition:
+        query_parts.append(f"Condition: {condition}")
+    if icf_code:
+        query_parts.append(f"ICF code: {icf_code}")
+    if domain:
+        query_parts.append(f"Domain: {domain}")
+    lines.append(f"_Query: {' · '.join(query_parts)}_\n")
+
+    for instrument, reason in sorted(matches, key=lambda x: x[0].abbreviation):
+        lines.append(
+            f"### {instrument.abbreviation}: {instrument.name}\n"
+            f"- **Why:** {reason}\n"
+            f"- **Domain:** {instrument.domain}\n"
+            f"- **Items:** {len(instrument.items)} · **Time:** {instrument.completion_time}\n"
+            f"- **RPM frequency:** {instrument.rpm_frequency}\n"
+        )
+
+    lines.append(f"*{len(matches)} instrument(s) matched. "
+                 f"Use `icf_instrument_details` for full questionnaire items.*")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def icf_instrument_icf_mapping(name: str) -> str:
+    """
+    Show how an assessment instrument maps to ICF codes.
+
+    Displays all ICF codes linked to an instrument, organized by relationship
+    type (primary, secondary, related), with code descriptions.
+
+    Args:
+        name: Instrument name or abbreviation (e.g., "GAD-7", "SLEDAI", "WHODAS")
+
+    Returns:
+        ICF code mappings organized by relationship type.
+    """
+    instrument = inst.resolve_instrument(name)
+    if not instrument:
+        available = ", ".join(i.abbreviation for i in inst.INSTRUMENTS.values())
+        return f"Unknown instrument '{name}'. Available: {available}"
+
+    lines = [
+        f"**ICF Mapping: {instrument.abbreviation} ({instrument.name})**\n",
+        f"Domain: {instrument.domain}\n",
+    ]
+
+    by_component: dict[str, list[inst.ICFMapping]] = {
+        "b": [], "s": [], "d": [], "e": [],
+    }
+    for m in instrument.icf_mappings:
+        prefix = m.code[0].lower()
+        if prefix in by_component:
+            by_component[prefix].append(m)
+
+    for prefix, mappings in by_component.items():
+        if mappings:
+            lines.append(f"\n### {_COMPONENTS[prefix]}\n")
+            for m in mappings:
+                badge = f"[{m.relationship}]"
+                lines.append(f"- **{m.code}**: {m.name} {badge}")
+
+    # Summary stats
+    total = len(instrument.icf_mappings)
+    primary = sum(1 for m in instrument.icf_mappings if m.relationship == "primary")
+    lines.append(
+        f"\n---\n*{total} ICF codes mapped ({primary} primary). "
+        f"Use `icf_lookup` on any code for full WHO API details.*"
+    )
+
+    return "\n".join(lines)
 
 
 # =============================================================================
