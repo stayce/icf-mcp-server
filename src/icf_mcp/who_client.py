@@ -5,7 +5,9 @@ This module handles authentication and API calls to the WHO ICD-API to access IC
 API Documentation: https://icd.who.int/docs/icd-api/APIDoc-Version2/
 """
 
+import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,6 +24,14 @@ ICF_LINEARIZATION = "icf"
 
 # Default API version
 DEFAULT_RELEASE = "2025-01"
+
+# ICF component letter → component name
+CATEGORY_NAMES = {
+    "b": "Body Functions",
+    "s": "Body Structures",
+    "d": "Activities and Participation",
+    "e": "Environmental Factors",
+}
 
 
 @dataclass
@@ -271,14 +281,11 @@ class WHOICFClient:
         entity = await self.get_entity_by_code(code)
         if not entity or not entity.children:
             return []
-        
-        children = []
-        for child_uri in entity.children:
-            child = await self.get_entity_by_uri(child_uri)
-            if child:
-                children.append(child)
-        
-        return children
+
+        fetched = await asyncio.gather(
+            *(self.get_entity_by_uri(uri) for uri in entity.children)
+        )
+        return [child for child in fetched if child]
     
     async def browse_category(self, category: str) -> dict[str, Any]:
         """
@@ -292,33 +299,30 @@ class WHOICFClient:
         Returns:
             Dictionary with category info and children/results
         """
-        import re
-
         cat = category.strip().lower()
-        category_map = {
-            "b": "Body Functions",
-            "s": "Body Structures",
-            "d": "Activities and Participation",
-            "e": "Environmental Factors",
-        }
 
         # Check if this is a sub-chapter (e.g., "b1", "d4", "e3")
         sub_match = re.match(r'^([bsde])(\d{1,3})$', cat)
 
         if sub_match:
             # Sub-chapter browsing — use entity lookup + children
-            component_letter = sub_match.group(1)
-            component_name = category_map.get(component_letter, "Unknown")
+            component_name = CATEGORY_NAMES[sub_match.group(1)]
 
             entity = await self.get_entity_by_code(cat)
             if not entity:
                 raise ValueError(
                     f"Sub-chapter '{cat}' not found in the WHO API. "
-                    f"Try a top-level category ({', '.join(category_map.keys())}) "
+                    f"Try a top-level category ({', '.join(CATEGORY_NAMES.keys())}) "
                     f"or a valid sub-chapter code."
                 )
 
-            children = await self.get_children(cat)
+            children = []
+            if entity.children:
+                fetched = await asyncio.gather(
+                    *(self.get_entity_by_uri(uri) for uri in entity.children)
+                )
+                children = [c for c in fetched if c]
+
             return {
                 "category": cat,
                 "name": f"{entity.title} ({component_name})",
@@ -329,19 +333,19 @@ class WHOICFClient:
                 ],
             }
 
-        if cat not in category_map:
+        if cat not in CATEGORY_NAMES:
             raise ValueError(
                 f"Invalid category '{category}'. "
-                f"Use a component letter ({', '.join(category_map.keys())}) "
+                f"Use a component letter ({', '.join(CATEGORY_NAMES.keys())}) "
                 f"or a sub-chapter code (e.g., b1, d4, e3)."
             )
 
         # Top-level category browsing — use search
-        results = await self.search(category_map[cat], max_results=20)
+        results = await self.search(CATEGORY_NAMES[cat], max_results=20)
 
         return {
             "category": cat,
-            "name": category_map[cat],
+            "name": CATEGORY_NAMES[cat],
             "description": self._get_category_description(cat),
             "results": [r.to_dict() for r in results],
         }
@@ -465,11 +469,11 @@ class WHOICFClient:
         if not parent or not parent.children:
             return entity, []
 
-        siblings = []
-        for child_uri in parent.children:
-            child = await self.get_entity_by_uri(child_uri)
-            if child and child.code != entity.code:
-                siblings.append(child)
+        sibling_uris = [uri for uri in parent.children if uri != entity.uri]
+        fetched = await asyncio.gather(
+            *(self.get_entity_by_uri(uri) for uri in sibling_uris)
+        )
+        siblings = [child for child in fetched if child and child.code != entity.code]
 
         return entity, siblings
 

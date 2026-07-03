@@ -271,25 +271,14 @@ async def icf_explain_qualifier(component: str = "generic", qualifier: int | Non
     Returns:
         Explanation of qualifier system for the specified component.
     """
-    # Generic severity scale (used as the 1st qualifier across b, s, d)
-    generic_scale = {
-        0: ("No problem", "0-4%", "None, absent, negligible"),
-        1: ("Mild problem", "5-24%", "Slight, low"),
-        2: ("Moderate problem", "25-49%", "Medium, fair"),
-        3: ("Severe problem", "50-95%", "High, extreme"),
-        4: ("Complete problem", "96-100%", "Total"),
-        8: ("Not specified", "N/A", "Insufficient information to specify"),
-        9: ("Not applicable", "N/A", "Inappropriate to apply"),
-    }
-
     comp = component.strip().lower()
 
     if comp == "generic" or comp == "b":
         label = "Body Functions (b) — Extent of Impairment" if comp == "b" else "Generic Severity Scale"
         if qualifier is not None:
-            if qualifier not in generic_scale:
+            if qualifier not in _GENERIC_SCALE:
                 return f"Invalid qualifier value '{qualifier}'. Valid: 0-4, 8, 9."
-            level, pct, desc = generic_scale[qualifier]
+            level, pct, desc = _GENERIC_SCALE[qualifier]
             example = f"b280.{qualifier}" if comp == "b" else f"d450.{qualifier}"
             return (
                 f"**{label} — Qualifier {qualifier}: {level}**\n\n"
@@ -298,37 +287,13 @@ async def icf_explain_qualifier(component: str = "generic", qualifier: int | Non
                 f"Example: {example} means '{level.lower()}'."
             )
         lines = [f"**{label}**\n"]
-        for val, (level, pct, desc) in generic_scale.items():
+        for val, (level, pct, desc) in _GENERIC_SCALE.items():
             lines.append(f"- **{val}**: {level} ({pct}) — {desc}")
         if comp == "b":
             lines.append("\nBody Functions use a single qualifier: b280.**2** = moderate impairment.")
         return "\n".join(lines)
 
     if comp == "s":
-        nature_of_change = {
-            0: "No change in structure",
-            1: "Total absence",
-            2: "Partial absence",
-            3: "Additional part",
-            4: "Aberrant dimensions",
-            5: "Discontinuity",
-            6: "Deviating position",
-            7: "Qualitative changes in structure",
-            8: "Not specified",
-            9: "Not applicable",
-        }
-        location = {
-            0: "More than one region",
-            1: "Right",
-            2: "Left",
-            3: "Both sides",
-            4: "Front",
-            5: "Back",
-            6: "Proximal",
-            7: "Distal",
-            8: "Not specified",
-            9: "Not applicable",
-        }
         lines = [
             "**Body Structures (s) — 3 Qualifiers**\n",
             "Body Structure codes use three qualifiers: `s{code}.{extent}{nature}{location}`\n",
@@ -336,13 +301,13 @@ async def icf_explain_qualifier(component: str = "generic", qualifier: int | Non
             "total absence (1), right side (2)\n",
             "### 1st Qualifier: Extent of Impairment\n",
         ]
-        for val, (level, pct, desc) in generic_scale.items():
+        for val, (level, pct, desc) in _GENERIC_SCALE.items():
             lines.append(f"- **{val}**: {level} ({pct})")
         lines.append("\n### 2nd Qualifier: Nature of Change\n")
-        for val, desc in nature_of_change.items():
+        for val, desc in _NATURE_OF_CHANGE.items():
             lines.append(f"- **{val}**: {desc}")
         lines.append("\n### 3rd Qualifier: Location\n")
-        for val, desc in location.items():
+        for val, desc in _LOCATION.items():
             lines.append(f"- **{val}**: {desc}")
         return "\n".join(lines)
 
@@ -356,25 +321,11 @@ async def icf_explain_qualifier(component: str = "generic", qualifier: int | Non
             "severe limitation in capacity (3)\n",
             "### Both qualifiers use the standard severity scale:\n",
         ]
-        for val, (level, pct, desc) in generic_scale.items():
+        for val, (level, pct, desc) in _GENERIC_SCALE.items():
             lines.append(f"- **{val}**: {level} ({pct})")
         return "\n".join(lines)
 
     if comp == "e":
-        barrier_scale = {
-            0: ("No barrier", "0-4%"),
-            1: ("Mild barrier", "5-24%"),
-            2: ("Moderate barrier", "25-49%"),
-            3: ("Severe barrier", "50-95%"),
-            4: ("Complete barrier", "96-100%"),
-        }
-        facilitator_scale = {
-            0: ("No facilitator", "0-4%"),
-            1: ("Mild facilitator", "5-24%"),
-            2: ("Moderate facilitator", "25-49%"),
-            3: ("Substantial facilitator", "50-95%"),
-            4: ("Complete facilitator", "96-100%"),
-        }
         lines = [
             "**Environmental Factors (e) — 1 Qualifier (Barrier or Facilitator)**\n",
             "Environmental codes use a single qualifier with two directions:\n",
@@ -382,13 +333,11 @@ async def icf_explain_qualifier(component: str = "generic", qualifier: int | Non
             "- **Facilitators** use a plus: `e{code}+{value}` (e.g., e120+3 = substantial facilitator)\n",
             "### Barrier Scale (negative influence)\n",
         ]
-        for val, (level, pct) in barrier_scale.items():
-            lines.append(f"- **.{val}**: {level} ({pct})")
+        for val in _BARRIER_SCALE:
+            lines.append(f"- **.{val}**: {_scale_meaning(_BARRIER_SCALE, val)}")
         lines.append("\n### Facilitator Scale (positive influence)\n")
-        for val, (level, pct) in facilitator_scale.items():
-            lines.append(f"- **+{val}**: {level} ({pct})")
-        lines.append("\n- **8**: Not specified")
-        lines.append("- **9**: Not applicable")
+        for val in _FACILITATOR_SCALE:
+            lines.append(f"- **+{val}**: {_scale_meaning(_FACILITATOR_SCALE, val)}")
         return "\n".join(lines)
 
     return (
@@ -613,14 +562,15 @@ _LEVELS = {
 }
 
 # Generic severity scale (used by b, s-1st, d-performance, d-capacity)
+# value → (label, percentage range, description)
 _GENERIC_SCALE = {
-    0: "No problem (0-4%)",
-    1: "Mild problem (5-24%)",
-    2: "Moderate problem (25-49%)",
-    3: "Severe problem (50-95%)",
-    4: "Complete problem (96-100%)",
-    8: "Not specified",
-    9: "Not applicable",
+    0: ("No problem", "0-4%", "None, absent, negligible"),
+    1: ("Mild problem", "5-24%", "Slight, low"),
+    2: ("Moderate problem", "25-49%", "Medium, fair"),
+    3: ("Severe problem", "50-95%", "High, extreme"),
+    4: ("Complete problem", "96-100%", "Total"),
+    8: ("Not specified", "N/A", "Insufficient information to specify severity"),
+    9: ("Not applicable", "N/A", "Inappropriate to apply this code"),
 }
 
 # Body Structures — 2nd qualifier: nature of change
@@ -651,27 +601,38 @@ _LOCATION = {
     9: "Not applicable",
 }
 
-# Environmental Factors — barrier scale
+# Environmental Factors — barrier scale: value → (label, percentage range)
 _BARRIER_SCALE = {
-    0: "No barrier (0-4%)",
-    1: "Mild barrier (5-24%)",
-    2: "Moderate barrier (25-49%)",
-    3: "Severe barrier (50-95%)",
-    4: "Complete barrier (96-100%)",
-    8: "Not specified",
-    9: "Not applicable",
+    0: ("No barrier", "0-4%"),
+    1: ("Mild barrier", "5-24%"),
+    2: ("Moderate barrier", "25-49%"),
+    3: ("Severe barrier", "50-95%"),
+    4: ("Complete barrier", "96-100%"),
+    8: ("Not specified", "N/A"),
+    9: ("Not applicable", "N/A"),
 }
 
-# Environmental Factors — facilitator scale
+# Environmental Factors — facilitator scale: value → (label, percentage range)
 _FACILITATOR_SCALE = {
-    0: "No facilitator (0-4%)",
-    1: "Mild facilitator (5-24%)",
-    2: "Moderate facilitator (25-49%)",
-    3: "Substantial facilitator (50-95%)",
-    4: "Complete facilitator (96-100%)",
-    8: "Not specified",
-    9: "Not applicable",
+    0: ("No facilitator", "0-4%"),
+    1: ("Mild facilitator", "5-24%"),
+    2: ("Moderate facilitator", "25-49%"),
+    3: ("Substantial facilitator", "50-95%"),
+    4: ("Complete facilitator", "96-100%"),
+    8: ("Not specified", "N/A"),
+    9: ("Not applicable", "N/A"),
 }
+
+
+def _scale_meaning(scale: dict[int, Any], value: int) -> str:
+    """Render a qualifier scale entry as 'Label (pct)' or a bare label."""
+    entry = scale.get(value)
+    if entry is None:
+        return "Unknown"
+    if isinstance(entry, tuple):
+        label, pct = entry[0], entry[1]
+        return f"{label} ({pct})" if pct != "N/A" else label
+    return entry
 
 
 def _parse_icf_code(raw: str) -> dict[str, Any]:
@@ -744,7 +705,7 @@ def _parse_icf_code(raw: str) -> dict[str, Any]:
             return result
         result["qualifiers"] = [
             {"name": "Extent of impairment", "value": qdigits[0],
-             "meaning": _GENERIC_SCALE.get(qdigits[0], "Unknown")}
+             "meaning": _scale_meaning(_GENERIC_SCALE, qdigits[0])}
         ]
 
     elif component == "s":
@@ -764,7 +725,7 @@ def _parse_icf_code(raw: str) -> dict[str, Any]:
             name, scale = scales[i]
             result["qualifiers"].append({
                 "name": name, "value": val,
-                "meaning": scale.get(val, "Unknown"),
+                "meaning": _scale_meaning(scale, val),
             })
 
     elif component == "d":
@@ -779,7 +740,7 @@ def _parse_icf_code(raw: str) -> dict[str, Any]:
         for i, val in enumerate(qdigits):
             result["qualifiers"].append({
                 "name": names[i], "value": val,
-                "meaning": _GENERIC_SCALE.get(val, "Unknown"),
+                "meaning": _scale_meaning(_GENERIC_SCALE, val),
             })
 
     elif component == "e":
@@ -794,7 +755,7 @@ def _parse_icf_code(raw: str) -> dict[str, Any]:
         label = "Facilitator" if is_facilitator else "Barrier"
         result["qualifiers"] = [
             {"name": label, "value": qdigits[0],
-             "meaning": scale.get(qdigits[0], "Unknown")}
+             "meaning": _scale_meaning(scale, qdigits[0])}
         ]
 
     return result
@@ -952,27 +913,20 @@ async def icf_build_profile(codes: list[str]) -> str:
     client = get_client()
 
     components: dict[str, dict] = {
-        "b": {"name": "Body Functions", "items": []},
-        "s": {"name": "Body Structures", "items": []},
-        "d": {"name": "Activities and Participation", "items": []},
-        "e": {"name": "Environmental Factors", "items": []},
+        prefix: {"name": name, "items": []} for prefix, name in _COMPONENTS.items()
     }
 
     not_found: list[str] = []
 
-    for code in codes:
-        code_clean = code.strip().lower()
-        try:
-            entity = await client.get_entity_by_code(code_clean)
-            if entity:
-                prefix = code_clean[0]
-                if prefix in components:
-                    components[prefix]["items"].append(entity)
-                else:
-                    not_found.append(code)
-            else:
-                not_found.append(code)
-        except Exception:
+    cleaned = [code.strip().lower() for code in codes]
+    entities = await asyncio.gather(
+        *(client.get_entity_by_code(c) for c in cleaned)
+    )
+
+    for code, code_clean, entity in zip(codes, cleaned, entities):
+        if entity and code_clean[:1] in components:
+            components[code_clean[0]]["items"].append(entity)
+        else:
             not_found.append(code)
 
     lines = ["**ICF Functional Profile**\n"]
@@ -1063,7 +1017,7 @@ async def icf_list_instruments(domain: str = "") -> str:
     Returns:
         Table of available instruments with key details.
     """
-    instruments = inst.INSTRUMENTS.values()
+    instruments = list(inst.INSTRUMENTS.values())
 
     if domain:
         domain_lower = domain.strip().lower()
@@ -1086,7 +1040,7 @@ async def icf_list_instruments(domain: str = "") -> str:
             f"Recall: {i.recall_period} · RPM: {i.rpm_frequency}"
         )
 
-    lines.append(f"\n*{len(list(instruments))} instrument(s). "
+    lines.append(f"\n*{len(instruments)} instrument(s). "
                  f"Use `icf_instrument_details` for full item text and scoring.*")
     lines.append(f"\n**Domains:** {', '.join(inst.DOMAINS)}")
 
@@ -1205,8 +1159,8 @@ async def icf_score_instrument(name: str, responses: list[int]) -> str:
 
     if result.get("icf_qualifier") is not None:
         q = result["icf_qualifier"]
-        q_labels = {0: "No problem", 1: "Mild", 2: "Moderate", 3: "Severe", 4: "Complete"}
-        lines.append(f"- **ICF Qualifier:** {q} — {q_labels.get(q, 'Unknown')}")
+        q_label = _GENERIC_SCALE[q][0] if q in _GENERIC_SCALE else "Unknown"
+        lines.append(f"- **ICF Qualifier:** {q} — {q_label}")
 
     # SLEDAI-specific: organ system summary
     if "organ_systems" in result:
@@ -1361,16 +1315,9 @@ async def icf_instrument_icf_mapping(name: str) -> str:
         if prefix in by_component:
             by_component[prefix].append(m)
 
-    component_names = {
-        "b": "Body Functions",
-        "s": "Body Structures",
-        "d": "Activities and Participation",
-        "e": "Environmental Factors",
-    }
-
     for prefix, mappings in by_component.items():
         if mappings:
-            lines.append(f"\n### {component_names[prefix]}\n")
+            lines.append(f"\n### {_COMPONENTS[prefix]}\n")
             for m in mappings:
                 badge = f"[{m.relationship}]"
                 lines.append(f"- **{m.code}**: {m.name} {badge}")

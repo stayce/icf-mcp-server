@@ -5,8 +5,8 @@ Standardized questionnaires used in Remote Patient Monitoring (RPM) for
 functional assessment, mapped to ICF codes and qualifier scales.
 """
 
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 
 @dataclass
@@ -58,6 +58,9 @@ class Instrument:
     references: list[str]
     rpm_frequency: str  # recommended RPM reassessment frequency
     notes: str = ""
+    # Instruments with non-trivial scoring set this to a dedicated scorer
+    # function; when None, the generic sum/mean path in score() applies.
+    scorer: Callable[[list[int]], dict[str, Any]] | None = None
 
     def score(self, responses: list[int | float]) -> dict[str, Any]:
         if len(responses) != len(self.items):
@@ -65,35 +68,34 @@ class Instrument:
                 "error": f"Expected {len(self.items)} responses, got {len(responses)}."
             }
 
-        if self.scoring_method == "sum":
-            total = sum(responses)
-        elif self.scoring_method == "mean":
+        if self.scoring_method == "mean":
             total = sum(responses) / len(responses)
-        elif self.scoring_method == "weighted":
-            total = sum(responses)
         else:
             total = sum(responses)
 
-        total = round(total, 2)
+        return _build_result(self, round(total, 2), response_count=len(responses))
 
-        interpretation = None
-        icf_qualifier = None
-        for sr in self.score_ranges:
-            if sr.min_score <= total <= sr.max_score:
-                interpretation = sr
-                icf_qualifier = sr.icf_qualifier
-                break
 
-        return {
-            "instrument": self.abbreviation,
-            "total_score": total,
-            "min_possible": self.min_score,
-            "max_possible": self.max_score,
-            "severity": interpretation.severity if interpretation else "Unknown",
-            "description": interpretation.description if interpretation else "",
-            "icf_qualifier": icf_qualifier,
-            "response_count": len(responses),
-        }
+def _build_result(instrument: "Instrument", total: float, **extras: Any) -> dict[str, Any]:
+    """Assemble a scored result dict from an instrument's score ranges."""
+    result: dict[str, Any] = {
+        "instrument": instrument.abbreviation,
+        "total_score": total,
+        "min_possible": instrument.min_score,
+        "max_possible": instrument.max_score,
+        "severity": "Unknown",
+        "description": "",
+        "icf_qualifier": None,
+        "response_count": len(instrument.items),
+    }
+    result.update(extras)
+    for sr in instrument.score_ranges:
+        if sr.min_score <= total <= sr.max_score:
+            result["severity"] = sr.severity
+            result["description"] = sr.description
+            result["icf_qualifier"] = sr.icf_qualifier
+            break
+    return result
 
 
 # ── Standard response scales ────────────────────────────────────────────────
@@ -356,21 +358,11 @@ def score_sledai(responses: list[int]) -> dict[str, Any]:
     if len(responses) != 24:
         return {"error": f"SLEDAI-2K requires 24 responses, got {len(responses)}."}
     total = sum(resp * SLEDAI_WEIGHTS[i + 1] for i, resp in enumerate(responses))
-    for sr in SLEDAI2K.score_ranges:
-        if sr.min_score <= total <= sr.max_score:
-            return {
-                "instrument": "SLEDAI-2K",
-                "total_score": total,
-                "min_possible": 0,
-                "max_possible": 105,
-                "severity": sr.severity,
-                "description": sr.description,
-                "icf_qualifier": sr.icf_qualifier,
-                "response_count": 24,
-                "active_descriptors": sum(responses),
-                "organ_systems": _sledai_organ_summary(responses),
-            }
-    return {"instrument": "SLEDAI-2K", "total_score": total, "severity": "Unknown"}
+    return _build_result(
+        SLEDAI2K, total,
+        active_descriptors=sum(responses),
+        organ_systems=_sledai_organ_summary(responses),
+    )
 
 
 def _sledai_organ_summary(responses: list[int]) -> dict[str, bool]:
@@ -546,25 +538,12 @@ HAQ_CATEGORIES = {
 def score_haq(responses: list[int]) -> dict[str, Any]:
     if len(responses) != 20:
         return {"error": f"HAQ-DI requires 20 responses, got {len(responses)}."}
-    category_scores = {}
-    for cat_name, item_numbers in HAQ_CATEGORIES.items():
-        indices = [n - 1 for n in item_numbers]
-        category_scores[cat_name] = max(responses[i] for i in indices)
+    category_scores = {
+        cat_name: max(responses[n - 1] for n in item_numbers)
+        for cat_name, item_numbers in HAQ_CATEGORIES.items()
+    }
     total = round(sum(category_scores.values()) / 8, 2)
-    for sr in HAQ_DI.score_ranges:
-        if sr.min_score <= total <= sr.max_score:
-            return {
-                "instrument": "HAQ-DI",
-                "total_score": total,
-                "min_possible": 0.0,
-                "max_possible": 3.0,
-                "severity": sr.severity,
-                "description": sr.description,
-                "icf_qualifier": sr.icf_qualifier,
-                "response_count": 20,
-                "category_scores": category_scores,
-            }
-    return {"instrument": "HAQ-DI", "total_score": total, "severity": "Unknown", "category_scores": category_scores}
+    return _build_result(HAQ_DI, total, category_scores=category_scores)
 
 
 # ── PROMIS Global-10 ─────────────────────────────────────────────────────────
@@ -593,7 +572,6 @@ _PROMIS_NEVER_ALWAYS = [
     ResponseOption(1, "Always"),
 ]
 
-_PROMIS_PAIN_0_10 = [ResponseOption(i, str(i)) for i in range(11)]
 
 PROMIS_10 = Instrument(
     id="promis10",
@@ -622,7 +600,7 @@ PROMIS_10 = Instrument(
             ResponseOption(2, "Severe"),
             ResponseOption(1, "Very severe"),
         ]),
-        InstrumentItem(9, "How would you rate your pain on average? (0=no pain, 10=worst pain imaginable)", _PROMIS_PAIN_0_10),
+        InstrumentItem(9, "How would you rate your pain on average? (0=no pain, 10=worst pain imaginable)", VAS_0_10),
         InstrumentItem(10, "In general, please rate how well you carry out your usual social activities and roles (activities at work, at home, with friends, in community).", _PROMIS_EXCELLENT_POOR),
     ],
     scoring_method="custom",
@@ -649,12 +627,31 @@ PROMIS_10 = Instrument(
     completion_time="2-4 minutes",
     references=["Hays RD, et al. Development of physical and mental health summary scores from the PROMIS Global items. Qual Life Res. 2009;18(7):873-880."],
     rpm_frequency="Weekly to monthly",
-    notes="GPH items: 3, 6, 7 (reverse), 8 (reverse), 9 (recode). GMH items: 2, 4, 5, 10. T-score conversion tables available from PROMIS.",
+    notes=(
+        "Items 7 and 8 are reverse-coded via their option values. Item 9 (0-10 pain) "
+        "is recoded to 1-5 before summing. GPH items: 3, 6, 8, 9. GMH items: 2, 4, 5, 7. "
+        "T-score conversion tables available from PROMIS."
+    ),
 )
 
 # PROMIS subscale item assignments
-PROMIS_GPH_ITEMS = [3, 6, 8, 9]  # Global Physical Health (item 9 needs recoding)
-PROMIS_GMH_ITEMS = [2, 4, 5, 10]  # Global Mental Health
+PROMIS_GPH_ITEMS = [3, 6, 8, 9]  # Global Physical Health (item 9 recoded)
+PROMIS_GMH_ITEMS = [2, 4, 5, 7]  # Global Mental Health
+
+
+def score_promis(responses: list[int]) -> dict[str, Any]:
+    if len(responses) != 10:
+        return {"error": f"PROMIS-10 requires 10 responses, got {len(responses)}."}
+    # Recode item 9 pain (0-10) to the 1-5 scale: 0→5, 1-3→4, 4-6→3, 7-9→2, 10→1
+    pain = responses[8]
+    recoded = list(responses)
+    recoded[8] = 5 if pain == 0 else 4 if pain <= 3 else 3 if pain <= 6 else 2 if pain <= 9 else 1
+    total = sum(recoded)
+    return _build_result(
+        PROMIS_10, total,
+        gph_raw=sum(recoded[n - 1] for n in PROMIS_GPH_ITEMS),
+        gmh_raw=sum(recoded[n - 1] for n in PROMIS_GMH_ITEMS),
+    )
 
 
 # ── CAT (COPD Assessment Test) ──────────────────────────────────────────────
@@ -792,20 +789,7 @@ def score_odi(responses: list[int]) -> dict[str, Any]:
     if len(responses) != 10:
         return {"error": f"ODI requires 10 responses, got {len(responses)}."}
     total = round((sum(responses) / 50) * 100, 1)
-    for sr in ODI.score_ranges:
-        if sr.min_score <= total <= sr.max_score:
-            return {
-                "instrument": "ODI",
-                "total_score": total,
-                "unit": "%",
-                "min_possible": 0,
-                "max_possible": 100,
-                "severity": sr.severity,
-                "description": sr.description,
-                "icf_qualifier": sr.icf_qualifier,
-                "response_count": 10,
-            }
-    return {"instrument": "ODI", "total_score": total, "severity": "Unknown"}
+    return _build_result(ODI, total, unit="%")
 
 
 # ── NRS Pain ─────────────────────────────────────────────────────────────────
@@ -909,6 +893,12 @@ FES_I_SHORT = Instrument(
 # Instrument Registry
 # ═════════════════════════════════════════════════════════════════════════════
 
+# Attach dedicated scorers to instruments whose scoring is not a plain sum/mean
+SLEDAI2K.scorer = score_sledai
+HAQ_DI.scorer = score_haq
+ODI.scorer = score_odi
+PROMIS_10.scorer = score_promis
+
 INSTRUMENTS: dict[str, Instrument] = {
     inst.id: inst for inst in [
         GAD7, PHQ9, RADAI5, SLEDAI2K, WHODAS2_12,
@@ -957,13 +947,8 @@ def score_instrument(name: str, responses: list[int | float]) -> dict[str, Any]:
     if not inst:
         return {"error": f"Unknown instrument '{name}'. Use icf_list_instruments to see available instruments."}
 
-    # Use specialized scorers for weighted/custom instruments
-    if inst.id == "sledai2k":
-        return score_sledai([int(r) for r in responses])
-    if inst.id == "haq_di":
-        return score_haq([int(r) for r in responses])
-    if inst.id == "odi":
-        return score_odi([int(r) for r in responses])
+    if inst.scorer:
+        return inst.scorer([int(r) for r in responses])
 
     return inst.score(responses)
 
