@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ICF MCP Server (`icf-mcp-server` v0.1.0) is a Model Context Protocol (MCP) server that provides tools for accessing the WHO International Classification of Functioning, Disability and Health (ICF) classification system via the WHO ICD-API. It enables AI assistants (e.g., Claude) to look up, search, and browse ICF codes through a standardized tool interface.
+ICF MCP Server (`icf-mcp-server`) is a Model Context Protocol (MCP) server that provides tools for accessing the WHO International Classification of Functioning, Disability and Health (ICF) classification system via the WHO ICD-API. It enables AI assistants (e.g., Claude) to look up, search, and browse ICF codes through a standardized tool interface.
 
 **Repository:** `stayce/icf-mcp-server` (MIT License)
 
@@ -15,9 +15,9 @@ ICF MCP Server (`icf-mcp-server` v0.1.0) is a Model Context Protocol (MCP) serve
 ```
 src/icf_mcp/
 ├── __init__.py      # Package exports: main, mcp, WHOICFClient, ICFEntity, ICFSearchResult
-├── instruments.py   # Clinical assessment instruments with ICF mappings (971 lines)
-├── server.py        # FastMCP server with 17 MCP tools + qualifier parsing (1400 lines)
-└── who_client.py    # Async WHO ICD-API client with OAuth2 auth (509 lines)
+├── instruments.py   # Clinical assessment instruments with ICF mappings
+├── server.py        # FastMCP server with 17 MCP tools + qualifier parsing
+└── who_client.py    # Async WHO ICD-API client with OAuth2 auth
 ```
 
 Uses `src/` layout with Hatchling build system. Entry point: `icf-mcp = "icf_mcp:main"`.
@@ -191,6 +191,6 @@ Each component has a different qualifier system:
 - **No linter/formatter config** — no ruff, flake8, mypy, or black configuration
 - **Build system:** Hatchling (`pyproject.toml` only — no `setup.py` or `setup.cfg`)
 - **Python version:** 3.11+ (uses `X | Y` union syntax, dataclasses)
-- **Version:** Tracked in both `pyproject.toml` and `src/icf_mcp/__init__.py` (`__version__ = "0.1.0"`) — keep in sync
+- **Version:** Tracked in both `pyproject.toml` and `src/icf_mcp/__init__.py` (`__version__`) — keep in sync, and add a `CHANGELOG.md` entry per release
 - **Error handling in tools:** Return descriptive error strings, don't let exceptions propagate to MCP clients
 - **Logging:** Use `logging` module, output to stderr, INFO level by default
